@@ -35,6 +35,17 @@
 #include <cups/raster.h>
 #include <cups/cups.h>
 
+/* Global flag for job cancellation */
+static volatile sig_atomic_t g_job_cancelled = 0;
+
+/* Signal handler for graceful job cancellation */
+static void handle_cancel_signal(int sig)
+{
+	(void)sig;
+	g_job_cancelled = 1;
+	fprintf(stderr, "DEBUG: CAPT: Job cancellation requested\n");
+}
+
 /* Global print options parsed from CUPS command line */
 /* { toner_save, toner_density(1-5), paper_type, hostname, username, doc_name } */
 static struct print_options_s g_print_options = { false, 3, 0, "", "", "" };
@@ -199,6 +210,12 @@ static void do_print(int fd)
 
 	while (1) {
 		bool page_printed = false;
+
+		/* Check for job cancellation */
+		if (g_job_cancelled) {
+			fprintf(stderr, "DEBUG: CAPT: Job cancelled, cleaning up\n");
+			break;
+		}
 
 		if (! cached_page) {
 			struct cups_page_header2_s header;
@@ -380,12 +397,17 @@ int main(int argc, char *argv[])
 	}
 
 	fprintf(stderr, "DEBUG: CAPT: rastertocapt started\n");
+
+	/* Set up signal handlers for graceful job cancellation */
 	signal(SIGPIPE, SIG_IGN);
+	signal(SIGTERM, handle_cancel_signal);
+	signal(SIGINT, handle_cancel_signal);
+
 	do_print(fd);
 	fprintf(stderr, "DEBUG: CAPT: rastertocapt finished\n");
 
 	if (argc == 7)
 		close(fd);
 
-	return 0;
+	return g_job_cancelled ? 0 : 0; /* Return 0 even on cancel for clean CUPS handling */
 }

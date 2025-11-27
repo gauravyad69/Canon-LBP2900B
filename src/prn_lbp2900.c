@@ -200,6 +200,38 @@ static void lbp3000_job_prologue(struct printer_state_s *state)
 	lbp2900_wait_ready(state->ops);
 }
 
+/* Determine paper size code from dimensions (paper_width x paper_height in 600dpi pixels) */
+static uint8_t get_paper_size_code(unsigned width, unsigned height)
+{
+	/*
+	 * Paper size codes from Windows capture analysis:
+	 * 0x01 = A4        (4960 x 7014)
+	 * 0x02 = Letter    (5100 x 6600)
+	 * 0x03 = Legal     (5100 x 8400)
+	 * 0x04 = Executive (4350 x 6300)
+	 * 0x05 = A5        (3496 x 4960)
+	 * 0x06 = B5        (4298 x 6070)
+	 * 0x07 = Com10     (2474 x 5700) envelope
+	 * 0x08 = Monarch   (2324 x 4500) envelope
+	 * 0x09 = C5        (3826 x 5408) envelope
+	 * 0x0A = DL        (2598 x 5196) envelope
+	 * 0x0B = Index     (1800 x 2400) 3x5 card
+	 *
+	 * We use width to identify since it varies more between sizes
+	 */
+	if (width <= 1900)                          return 0x0B; /* Index Card 3x5 */
+	if (width <= 2400)                          return 0x08; /* Monarch */
+	if (width <= 2550)                          return 0x0A; /* DL Envelope */
+	if (width <= 2600)                          return 0x07; /* Com10 */
+	if (width <= 3600)                          return 0x05; /* A5 */
+	if (width <= 3900)                          return 0x09; /* C5 Envelope */
+	if (width <= 4350)                          return 0x06; /* B5 */
+	if (width <= 4450)                          return 0x04; /* Executive */
+	if (width <= 5000)                          return 0x01; /* A4 */
+	if (height <= 6700)                         return 0x02; /* Letter */
+	return 0x03; /* Legal (widest standard size) */
+}
+
 static bool lbp2900_page_prologue(struct printer_state_s *state, const struct page_dims_s *dims)
 {
 	const struct capt_status_s *status;
@@ -219,8 +251,13 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	static const uint8_t density_map[] = { 0x1F, 0x0F, 0x17, 0x1F, 0x2F, 0x3F };
 	uint8_t density = density_map[density_level];
 
+	/* Get paper size code based on page dimensions */
+	uint8_t paper_code = get_paper_size_code(dims->paper_width, dims->paper_height);
+	fprintf(stderr, "DEBUG: CAPT: Paper size code 0x%02X for %ux%u pixels\n",
+		paper_code, dims->paper_width, dims->paper_height);
+
 	uint8_t pageparms[] = {
-		0x00, 0x00, 0x30, 0x2A, /* sz */ 0x02, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x30, 0x2A, /* sz */ paper_code, 0x00, 0x00, 0x00,
 		density, 0x1C, 0x1C, 0x1C, paper_type, /* adapt */ 0x11, 0x04, 0x00,
 		0x01, 0x01, /* img ref */ 0x00, save, 0x00, 0x00,
 		/* height margin 118 */ 0x76, 0x00,

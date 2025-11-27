@@ -1,6 +1,6 @@
 # Canon LBP2900/LBP3000 CAPT Driver
 
-A reverse-engineered CUPS driver for Canon CAPT-based printers (LBP2900, LBP2900B, LBP3000).
+A reverse-engineered CUPS driver for Canon CAPT-based printers (LBP2900, LBP2900B).
 
 ## Features
 

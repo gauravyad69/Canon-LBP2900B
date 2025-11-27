@@ -13,7 +13,7 @@ makedepends=('autoconf' 'automake' 'cups')
 provides=('captdriver')
 conflicts=('captdriver')
 source=("${pkgname}-${pkgver}.tar.gz::https://github.com/gauravyad69/Canon-LBP2900B/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('88e0cb030981230ec7fdbf65b08781b1f54dccbe5be1126dce1312762a3a6ac6')
 
 build() {
     cd "Canon-LBP2900B-${pkgver}"

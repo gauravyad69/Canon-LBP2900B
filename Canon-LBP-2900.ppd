@@ -25,6 +25,9 @@
 *cupsManualCopies: False
 *cupsFilter: "application/vnd.cups-raster 1 rastertocapt"
 *cupsLanguages: "en"
+*cupsIPPSupplies: False
+*cupsSNMPSupplies: False
+*APPrinterErrorPolicy: abort-job
 *OpenUI *PageSize/Media Size: PickOne
 *OrderDependency: 10 AnySetup *PageSize
 *DefaultPageSize: A4

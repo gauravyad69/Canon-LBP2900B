@@ -21,13 +21,19 @@
 #include "printer.h"
 #include "paper.h"
 
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include <cups/raster.h>
+#include <cups/cups.h>
+
+/* Global print options parsed from CUPS command line */
+static struct print_options_s g_print_options = { false, false };
 
 
 struct cached_page_s {
@@ -181,6 +187,7 @@ static void do_print(int fd)
 		state = calloc(1, sizeof(struct printer_state_s));
 	state->ops = ops;
 	state->ipage = 0;
+	state->options = g_print_options; /* Copy global options to state */
 
 	raster = cupsRasterOpen(fd, CUPS_RASTER_READ);
 
@@ -280,6 +287,31 @@ static void do_print(int fd)
 }
 
 
+static void parse_options(const char *options)
+{
+	cups_option_t *cups_options = NULL;
+	int num_options;
+	const char *val;
+
+	num_options = cupsParseOptions(options, 0, &cups_options);
+
+	/* Parse TonerDensity option */
+	val = cupsGetOption("TonerDensity", num_options, cups_options);
+	if (val && strcasecmp(val, "High") == 0) {
+		g_print_options.toner_density_high = true;
+		fprintf(stderr, "DEBUG: CAPT: Toner density set to High\n");
+	}
+
+	/* Parse TonerSave option */
+	val = cupsGetOption("TonerSave", num_options, cups_options);
+	if (val && strcasecmp(val, "On") == 0) {
+		g_print_options.toner_save = true;
+		fprintf(stderr, "DEBUG: CAPT: Toner save mode enabled\n");
+	}
+
+	cupsFreeOptions(num_options, cups_options);
+}
+
 int main(int argc, char *argv[])
 {
 	int fd = 0;
@@ -288,6 +320,9 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "Usage: %s job-id user title copies options [file]\n", argv[0]);
 		return 1;
 	}
+
+	/* Parse print options from argv[5] */
+	parse_options(argv[5]);
 
 	if (argc == 7) {
 		fd = open(argv[6], O_RDONLY);

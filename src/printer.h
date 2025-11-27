@@ -29,6 +29,12 @@ enum printer_support {
 	FULLY,
 };
 
+/* Print options from CUPS/PPD */
+struct print_options_s {
+	bool toner_save;       /* Toner saving mode */
+	bool toner_density_high; /* High toner density */
+};
+
 struct page_dims_s;
 
 struct printer_state_s {
@@ -36,6 +42,7 @@ struct printer_state_s {
 	unsigned ipage;
 	unsigned iband;
 	unsigned isend;
+	struct print_options_s options; /* Print options from CUPS */
 };
 
 struct printer_ops_s {

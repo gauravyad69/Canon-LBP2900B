@@ -206,14 +206,22 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	size_t s;
 	uint8_t buf[16];
 
-	uint8_t pt1 = 0x01;
+	uint8_t paper_type = state->options.paper_type; /* 0=Plain, 1=Heavy, 2=HeavyH, 3=PlainL, 4=ohp, 5=Envelope */
+	if (paper_type > 5) paper_type = 0; /* default to Plain if invalid */
 	uint8_t save = state->options.toner_save ? 0x01 : 0x00;
 	uint8_t pt2 = 0x01;
-	uint8_t density = state->options.toner_density_high ? 0x3F : 0x1F;
+	
+	/* Toner density: 1=Lightest, 2=Light, 3=Normal, 4=Dark, 5=Darkest */
+	/* Map to density byte: observed values range from ~0x0F (lightest) to ~0x3F (darkest) */
+	uint8_t density_level = state->options.toner_density;
+	if (density_level < 1 || density_level > 5) density_level = 3; /* default to Normal */
+	/* Density values: 1->0x0F, 2->0x17, 3->0x1F, 4->0x2F, 5->0x3F */
+	static const uint8_t density_map[] = { 0x1F, 0x0F, 0x17, 0x1F, 0x2F, 0x3F };
+	uint8_t density = density_map[density_level];
 
 	uint8_t pageparms[] = {
 		0x00, 0x00, 0x30, 0x2A, /* sz */ 0x02, 0x00, 0x00, 0x00,
-		density, 0x1C, 0x1C, 0x1C, pt1, /* adapt */ 0x11, 0x04, 0x00,
+		density, 0x1C, 0x1C, 0x1C, paper_type, /* adapt */ 0x11, 0x04, 0x00,
 		0x01, 0x01, /* img ref */ 0x00, save, 0x00, 0x00,
 		/* height margin 118 */ 0x76, 0x00,
 		/*  width margin 78 */  0x4e, 0x00,

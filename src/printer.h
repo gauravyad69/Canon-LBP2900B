@@ -31,8 +31,9 @@ enum printer_support {
 
 /* Print options from CUPS/PPD */
 struct print_options_s {
-	bool toner_save;         /* Toner saving mode */
-	bool toner_density_high; /* High toner density */
+	bool toner_save;         /* Toner saving mode (CNTonerSaving) */
+	uint8_t toner_density;   /* Toner density 1-5 (CNTonerDensity), default 3 */
+	uint8_t paper_type;      /* Paper type: 0=Plain, 1=Heavy, 2=HeavyH, 3=PlainL, 4=ohp, 5=Envelope */
 	char hostname[64];       /* Hostname for job metadata */
 	char username[64];       /* Username for job metadata */
 	char doc_name[128];      /* Document name for job metadata */

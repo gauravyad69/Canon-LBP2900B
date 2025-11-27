@@ -36,7 +36,8 @@
 #include <cups/cups.h>
 
 /* Global print options parsed from CUPS command line */
-static struct print_options_s g_print_options = { false, false, "", "", "" };
+/* { toner_save, toner_density(1-5), paper_type, hostname, username, doc_name } */
+static struct print_options_s g_print_options = { false, 3, 0, "", "", "" };
 
 
 struct cached_page_s {
@@ -298,18 +299,45 @@ static void parse_options(const char *options)
 
 	num_options = cupsParseOptions(options, 0, &cups_options);
 
-	/* Parse TonerDensity option */
-	val = cupsGetOption("TonerDensity", num_options, cups_options);
-	if (val && strcasecmp(val, "High") == 0) {
-		g_print_options.toner_density_high = true;
-		fprintf(stderr, "DEBUG: CAPT: Toner density set to High\n");
+	/* Parse CNTonerDensity option (1-5, default 3) */
+	val = cupsGetOption("CNTonerDensity", num_options, cups_options);
+	if (val) {
+		int density = atoi(val);
+		if (density >= 1 && density <= 5) {
+			g_print_options.toner_density = density;
+			fprintf(stderr, "DEBUG: CAPT: Toner density set to %d\n", density);
+		}
 	}
 
-	/* Parse TonerSave option */
-	val = cupsGetOption("TonerSave", num_options, cups_options);
-	if (val && strcasecmp(val, "On") == 0) {
+	/* Parse CNTonerSaving option */
+	val = cupsGetOption("CNTonerSaving", num_options, cups_options);
+	if (val && strcasecmp(val, "True") == 0) {
 		g_print_options.toner_save = true;
 		fprintf(stderr, "DEBUG: CAPT: Toner save mode enabled\n");
+	}
+
+	/* Parse MediaType (Paper Type) option - Canon naming */
+	val = cupsGetOption("MediaType", num_options, cups_options);
+	if (val) {
+		if (strcasecmp(val, "PlainPaper") == 0) {
+			g_print_options.paper_type = 0x00;
+			fprintf(stderr, "DEBUG: CAPT: Paper type: Plain Paper\n");
+		} else if (strcasecmp(val, "ThickPaper") == 0) {
+			g_print_options.paper_type = 0x01;
+			fprintf(stderr, "DEBUG: CAPT: Paper type: Heavy Paper\n");
+		} else if (strcasecmp(val, "ThickPaperH") == 0) {
+			g_print_options.paper_type = 0x02;
+			fprintf(stderr, "DEBUG: CAPT: Paper type: Heavy Paper H\n");
+		} else if (strcasecmp(val, "PlainLPaper") == 0) {
+			g_print_options.paper_type = 0x03;
+			fprintf(stderr, "DEBUG: CAPT: Paper type: Plain Paper L\n");
+		} else if (strcasecmp(val, "ohp") == 0) {
+			g_print_options.paper_type = 0x04;
+			fprintf(stderr, "DEBUG: CAPT: Paper type: Transparency\n");
+		} else if (strcasecmp(val, "Envelope") == 0) {
+			g_print_options.paper_type = 0x05;
+			fprintf(stderr, "DEBUG: CAPT: Paper type: Envelope\n");
+		}
 	}
 
 	cupsFreeOptions(num_options, cups_options);

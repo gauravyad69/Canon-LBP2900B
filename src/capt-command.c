@@ -17,6 +17,8 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#define _DEFAULT_SOURCE  /* For usleep() */
+
 #include "capt-command.h"
 
 #include "std.h"
@@ -24,9 +26,13 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include <cups/cups.h>
 #include <cups/sidechannel.h>
+
+#define CAPT_MAX_RETRIES 3
+#define CAPT_RETRY_DELAY_MS 500
 
 static uint8_t capt_iobuf[0x10000];
 static size_t  capt_iosize;
@@ -87,17 +93,39 @@ static void capt_send_buf(void)
 static void capt_recv_buf(size_t offset, size_t expected)
 {
 	ssize_t size;
+	int retry;
+	
 	if (offset + expected > sizeof(capt_iobuf)) {
 		fprintf(stderr, "ALERT: bug in CAPT driver, input buffer overflow\n");
 		exit(1);
 	}
-	fprintf(stderr, "DEBUG: CAPT: waiting for %u bytes\n", (unsigned) expected);
-	size = cupsBackChannelRead((char *) capt_iobuf + offset, expected, 15.0);
-	if (size < 0) {
-		fprintf(stderr, "ERROR: CAPT: no reply from printer\n");
-		exit(1);
+	
+	for (retry = 0; retry <= CAPT_MAX_RETRIES; retry++) {
+		if (retry > 0) {
+			fprintf(stderr, "DEBUG: CAPT: communication retry %d/%d\n", retry, CAPT_MAX_RETRIES);
+			usleep(CAPT_RETRY_DELAY_MS * 1000);
+		}
+		
+		fprintf(stderr, "DEBUG: CAPT: waiting for %u bytes\n", (unsigned) expected);
+		size = cupsBackChannelRead((char *) capt_iobuf + offset, expected, 15.0);
+		
+		if (size > 0) {
+			capt_iosize = offset + size;
+			return; /* Success */
+		}
+		
+		if (size == 0) {
+			fprintf(stderr, "DEBUG: CAPT: no data received, will retry\n");
+			continue;
+		}
+		
+		/* size < 0 indicates error */
+		fprintf(stderr, "DEBUG: CAPT: read error (size=%zd), will retry\n", size);
 	}
-	capt_iosize = offset + size;
+	
+	/* All retries exhausted */
+	fprintf(stderr, "ERROR: CAPT: no reply from printer after %d retries\n", CAPT_MAX_RETRIES);
+	exit(1);
 }
 
 const char *capt_identify(void)
@@ -145,43 +173,63 @@ void capt_send(uint16_t cmd, const void *buf, size_t size)
 
 void capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size_t *reply_size)
 {
-	capt_send(cmd, buf, size);
-	capt_recv_buf(0, 6);
-	if (capt_iosize != 6 || WORD(capt_iobuf[0], capt_iobuf[1]) != cmd) {
-		fprintf(stderr, "ERROR: CAPT: bad reply from printer, "
-				"expected %02X %02X xx xx xx xx, got", LO(cmd), HI(cmd));
-		capt_debug_buf("ERROR", 6);
-		exit(1);
-	}
-	while (1) {
-		if (WORD(capt_iobuf[2], capt_iobuf[3]) == capt_iosize)
-			break;
-		if (BCD(capt_iobuf[2], capt_iobuf[3]) == capt_iosize)
-			break;
-		/* block at 64 byte boundary is not the last one */
-		if (WORD(capt_iobuf[2], capt_iobuf[3]) > capt_iosize && capt_iosize % 64 == 6) {
-			capt_recv_buf(capt_iosize, WORD(capt_iobuf[2], capt_iobuf[3]) - capt_iosize);
-			continue;
+	int retry;
+	
+	for (retry = 0; retry <= CAPT_MAX_RETRIES; retry++) {
+		if (retry > 0) {
+			fprintf(stderr, "DEBUG: CAPT: sendrecv retry %d/%d for cmd %04X\n", 
+				retry, CAPT_MAX_RETRIES, cmd);
+			usleep(CAPT_RETRY_DELAY_MS * 1000);
 		}
-		/* we should never get here */
-		fprintf(stderr, "ERROR: CAPT: bad reply from printer, "
-				"expected size %02X %02X, got %02X %02X\n",
-				capt_iobuf[2], capt_iobuf[3], LO(capt_iosize), HI(capt_iosize));
-		capt_debug_buf("ERROR", capt_iosize);
-		exit(1);
+		
+		capt_send(cmd, buf, size);
+		capt_recv_buf(0, 6);
+		
+		if (capt_iosize != 6 || WORD(capt_iobuf[0], capt_iobuf[1]) != cmd) {
+			fprintf(stderr, "DEBUG: CAPT: bad reply header, expected %02X %02X, got %02X %02X\n",
+					LO(cmd), HI(cmd), capt_iobuf[0], capt_iobuf[1]);
+			if (retry < CAPT_MAX_RETRIES)
+				continue; /* Retry */
+			fprintf(stderr, "ERROR: CAPT: bad reply from printer after retries, "
+					"expected %02X %02X xx xx xx xx, got", LO(cmd), HI(cmd));
+			capt_debug_buf("ERROR", 6);
+			exit(1);
+		}
+		
+		/* Header OK, now read the rest of the response */
+		while (1) {
+			if (WORD(capt_iobuf[2], capt_iobuf[3]) == capt_iosize)
+				break;
+			if (BCD(capt_iobuf[2], capt_iobuf[3]) == capt_iosize)
+				break;
+			/* block at 64 byte boundary is not the last one */
+			if (WORD(capt_iobuf[2], capt_iobuf[3]) > capt_iosize && capt_iosize % 64 == 6) {
+				capt_recv_buf(capt_iosize, WORD(capt_iobuf[2], capt_iobuf[3]) - capt_iosize);
+				continue;
+			}
+			/* Size mismatch - this shouldn't happen after retries in recv_buf */
+			fprintf(stderr, "ERROR: CAPT: bad reply from printer, "
+					"expected size %02X %02X, got %02X %02X\n",
+					capt_iobuf[2], capt_iobuf[3], LO(capt_iosize), HI(capt_iosize));
+			capt_debug_buf("ERROR", capt_iosize);
+			exit(1);
+		}
+		
+		/* Success! */
+		if (debug) {
+			fprintf(stderr, "DEBUG: CAPT: recv ");
+			capt_debug_buf("DEBUG", capt_iosize);
+		}
+		if (reply) {
+			size_t copysize = reply_size ? *reply_size : capt_iosize;
+			if (copysize > capt_iosize)
+				copysize = capt_iosize;
+			memcpy(reply, capt_iobuf + 4, copysize);
+		}
+		if (reply_size)
+			*reply_size = capt_iosize;
+		return;
 	}
-	if (debug) {
-		fprintf(stderr, "DEBUG: CAPT: recv ");
-		capt_debug_buf("DEBUG", capt_iosize);
-	}
-	if (reply) {
-		size_t copysize = reply_size ? *reply_size : capt_iosize;
-		if (copysize > capt_iosize)
-			copysize = capt_iosize;
-		memcpy(reply, capt_iobuf + 4, copysize);
-	}
-	if (reply_size)
-		*reply_size = capt_iosize;
 }
 
 void capt_multi_begin(uint16_t cmd)

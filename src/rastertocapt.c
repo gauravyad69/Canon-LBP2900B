@@ -17,23 +17,26 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200112L
+
 #include "std.h"
 #include "printer.h"
 #include "paper.h"
 
-#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include <cups/raster.h>
 #include <cups/cups.h>
 
 /* Global print options parsed from CUPS command line */
-static struct print_options_s g_print_options = { false, false };
+static struct print_options_s g_print_options = { false, false, "", "", "" };
 
 
 struct cached_page_s {
@@ -323,6 +326,22 @@ int main(int argc, char *argv[])
 
 	/* Parse print options from argv[5] */
 	parse_options(argv[5]);
+
+	/* Capture job metadata from CUPS arguments */
+	/* argv[2] = username, argv[3] = document title */
+	if (gethostname(g_print_options.hostname, sizeof(g_print_options.hostname) - 1) != 0) {
+		strncpy(g_print_options.hostname, "Linux", sizeof(g_print_options.hostname) - 1);
+	}
+	g_print_options.hostname[sizeof(g_print_options.hostname) - 1] = '\0';
+
+	strncpy(g_print_options.username, argv[2], sizeof(g_print_options.username) - 1);
+	g_print_options.username[sizeof(g_print_options.username) - 1] = '\0';
+
+	strncpy(g_print_options.doc_name, argv[3], sizeof(g_print_options.doc_name) - 1);
+	g_print_options.doc_name[sizeof(g_print_options.doc_name) - 1] = '\0';
+
+	fprintf(stderr, "DEBUG: CAPT: Job metadata - Host: %s, User: %s, Doc: %s\n",
+		g_print_options.hostname, g_print_options.username, g_print_options.doc_name);
 
 	if (argc == 7) {
 		fd = open(argv[6], O_RDONLY);

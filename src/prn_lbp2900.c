@@ -28,6 +28,9 @@
 #include "paper.h"
 #include "printer.h"
 
+#include <stdlib.h>
+#include <stdio.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,27 +58,77 @@ static void lbp2900_wait_ready(const struct printer_ops_s *ops)
 	lops->wait_ready();
 }
 
-static void send_job_start(uint8_t fg, uint16_t page)
+/* Convert ASCII string to UTF-16LE, returns number of bytes written */
+static size_t ascii_to_utf16le(uint8_t *dest, const char *src, size_t max_chars)
 {
-	uint8_t ml = 0x00; /* host name lenght */
-	uint8_t ul = 0x00; /* user name lenght */
-	uint8_t nl = 0x00; /* document name lenght */
+	size_t i;
+	size_t len = strlen(src);
+	if (len > max_chars) len = max_chars;
+	for (i = 0; i < len; i++) {
+		dest[i * 2] = (uint8_t)src[i];     /* Low byte */
+		dest[i * 2 + 1] = 0x00;            /* High byte (ASCII = 0) */
+	}
+	return len * 2; /* Return byte count */
+}
+
+static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t page)
+{
+	const char *hostname = state->options.hostname;
+	const char *username = state->options.username;
+	const char *doc_name = state->options.doc_name;
+
+	/* Calculate UTF-16LE string lengths in bytes */
+	uint16_t ml = (uint16_t)(strlen(hostname) * 2);
+	uint16_t ul = (uint16_t)(strlen(username) * 2);
+	uint16_t nl = (uint16_t)(strlen(doc_name) * 2);
+
 	time_t rawtime = time(NULL);
 	const struct tm *tm = localtime(&rawtime);
-	uint8_t buf[32 + 40 + ml + ul + nl];
-	uint8_t head[32] = {
-		0x00, 0x00, 0x00, 0x00, LO(page), HI(page), 0x00, 0x00,
-		ml, 0x00, ul, 0x00, nl, 0x00, 0x00, 0x00,
-		fg, 0x01, LO(job), HI(job),
-		/*-60 */ 0xC4, 0xFF,
-		/*-120*/ 0x88, 0xFF,
-		LO(tm->tm_year), HI(tm->tm_year), (uint8_t) tm->tm_mon, (uint8_t) tm->tm_mday,
-		(uint8_t) tm->tm_hour, (uint8_t) tm->tm_min, (uint8_t) tm->tm_sec,
-		0x01,
-	};
-	memcpy(buf, head, sizeof(head));
-	memset(buf + 32, 0, 40 + ml + ul + nl);
-	capt_sendrecv(CAPT_JOB_SETUP, buf, sizeof(buf), NULL, 0);
+
+	/* Buffer: 32 byte header + 40 bytes reserved + strings */
+	size_t bufsize = 32 + 40 + ml + ul + nl;
+	uint8_t *buf = malloc(bufsize);
+	if (!buf) {
+		fprintf(stderr, "ERROR: CAPT: Failed to allocate job setup buffer\n");
+		return;
+	}
+	memset(buf, 0, bufsize);
+
+	/* Build header (32 bytes) */
+	buf[0] = 0x00; buf[1] = 0x00; buf[2] = 0x00; buf[3] = 0x00;
+	buf[4] = LO(page); buf[5] = HI(page);
+	buf[6] = 0x00; buf[7] = 0x00;
+	buf[8] = LO(ml); buf[9] = HI(ml);     /* Hostname length (UTF-16LE bytes) */
+	buf[10] = LO(ul); buf[11] = HI(ul);   /* Username length */
+	buf[12] = LO(nl); buf[13] = HI(nl);   /* Doc name length */
+	buf[14] = 0x00; buf[15] = 0x00;
+	buf[16] = fg; buf[17] = 0x01;
+	buf[18] = LO(job); buf[19] = HI(job);
+	buf[20] = 0xC4; buf[21] = 0xFF;       /* -60 timezone offset */
+	buf[22] = 0x88; buf[23] = 0xFF;       /* -120 */
+	buf[24] = LO(tm->tm_year); buf[25] = HI(tm->tm_year);
+	buf[26] = (uint8_t)tm->tm_mon;
+	buf[27] = (uint8_t)tm->tm_mday;
+	buf[28] = (uint8_t)tm->tm_hour;
+	buf[29] = (uint8_t)tm->tm_min;
+	buf[30] = (uint8_t)tm->tm_sec;
+	buf[31] = 0x01;
+
+	/* Reserved area (40 bytes) at offset 32, already zeroed */
+
+	/* Write UTF-16LE strings at offset 72 */
+	size_t offset = 72;
+	ascii_to_utf16le(buf + offset, hostname, 32);
+	offset += ml;
+	ascii_to_utf16le(buf + offset, username, 32);
+	offset += ul;
+	ascii_to_utf16le(buf + offset, doc_name, 64);
+
+	fprintf(stderr, "DEBUG: CAPT: Job setup - Host: %s, User: %s, Doc: %s\n",
+		hostname, username, doc_name);
+
+	capt_sendrecv(CAPT_JOB_SETUP, buf, bufsize, NULL, 0);
+	free(buf);
 }
 
 static const uint8_t magicbuf_0[] = {
@@ -119,7 +172,7 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 	capt_sendrecv(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf), NULL, 0);
 	lbp2900_wait_ready(state->ops);
 
-	send_job_start(1, 0);
+	send_job_start(state, 1, 0);
 	lbp2900_wait_ready(state->ops);
 }
 
@@ -137,7 +190,7 @@ static void lbp3000_job_prologue(struct printer_state_s *state)
 	 * and then proceeds to hang at this (commented out)
 	 * spot. That's the difference, or so it seems. */
 /*	lbp2900_wait_ready(state->ops);	*/
-	send_job_start(1, 0);
+	send_job_start(state, 1, 0);
 	
 	/* There's also that command, that apparently does something, and does something, 
 	 * but it's there in the Wireshark logs. Response data == command data. */
@@ -228,14 +281,14 @@ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct pa
 	  if (status->page_received == status->page_decoding)
 	    break;
 	}
-	send_job_start(2, status->page_decoding);
+	send_job_start(state, 2, status->page_decoding);
 	lbp2900_wait_ready(state->ops);
 
 	uint8_t buf[2] = { LO(status->page_decoding), HI(status->page_decoding) };
 	capt_sendrecv(CAPT_FIRE, buf, 2, NULL, 0);
 	lbp2900_wait_ready(state->ops);
 
-	send_job_start(6, status->page_decoding);
+	send_job_start(state, 6, status->page_decoding);
 
 	while (1) {
 		const struct capt_status_s *status = lbp2900_get_status(state->ops);

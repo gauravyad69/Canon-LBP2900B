@@ -31,8 +31,11 @@ enum printer_support {
 
 /* Print options from CUPS/PPD */
 struct print_options_s {
-	bool toner_save;       /* Toner saving mode */
+	bool toner_save;         /* Toner saving mode */
 	bool toner_density_high; /* High toner density */
+	char hostname[64];       /* Hostname for job metadata */
+	char username[64];       /* Username for job metadata */
+	char doc_name[128];      /* Document name for job metadata */
 };
 
 struct page_dims_s;

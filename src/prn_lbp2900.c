@@ -171,6 +171,13 @@ static const uint8_t blinkonbuf[] = {
 	0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
 };
 
+static const uint8_t jambuf[] = {
+	/* Paper jam LED pattern (different from no-paper)
+	 * From USB capture: 00 00 06 00 00 00 00 00 00 00 00 01 */
+	0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+};
+
 static const uint8_t blinkoffbuf[] = {
 	/* LED off (normal operation) */
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -196,8 +203,15 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 	capt_sendrecv(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf), NULL, 0);
 	lbp2900_wait_ready(state->ops);
 
-	send_job_start(state, 1, 0);
+	/* Use fg=2 for retry after error recovery, fg=1 for new job.
+	 * USB captures show: initial job uses fg=1, retry after
+	 * out-of-paper/jam recovery uses fg=2 in JOB_SETUP. */
+	uint8_t fg = state->is_retry ? 2 : 1;
+	send_job_start(state, fg, 0);
 	lbp2900_wait_ready(state->ops);
+
+	/* Clear retry flag after job setup */
+	state->is_retry = false;
 }
 
 static void lbp3000_job_prologue(struct printer_state_s *state)
@@ -219,7 +233,7 @@ static void lbp3000_job_prologue(struct printer_state_s *state)
 	/* There's also that command, that apparently does something, and does something, 
 	 * but it's there in the Wireshark logs. Response data == command data. */
 	uint8_t dummy[2] = {0, 0};
-	capt_sendrecv(0xE0A6, dummy, sizeof(dummy), NULL, 0);
+	capt_sendrecv(CAPT_RESET, dummy, sizeof(dummy), NULL, 0);
 	
 	lbp2900_wait_ready(state->ops);
 }
@@ -382,6 +396,13 @@ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct pa
 		/* Interesting. Using page_printing here results in shifted print */
 		if (status->page_out == status->page_decoding)
 			return true;
+		/* Paper jam / cover open: s2 bit 14 (0x4000) + s4 bit 7 (0x0080)
+		 * Seen in USB captures: s2 toggles 0100→4100 with s4 toggling 0→0080 */
+		if (FLAG(status, CAPT_FL_PAPERJAM) || FLAG(status, CAPT_FL_JAMERR)) {
+			fprintf(stderr, "DEBUG: CAPT: paper jam or cover open detected\n");
+			return false;
+		}
+		/* No paper: original check via NOPAPER flags */
 		if (FLAG(status, CAPT_FL_NOPAPER2) || FLAG(status, CAPT_FL_NOPAPER1)) {
 			fprintf(stderr, "DEBUG: CAPT: no paper\n");
 			if (FLAG(status, CAPT_FL_PRINTING) || FLAG(status, CAPT_FL_PROCESSING1))
@@ -480,16 +501,44 @@ static void lbp2900_page_setup(struct printer_state_s *state,
 
 static void lbp2900_wait_user(struct printer_state_s *state)
 {
-	(void) state;
+	const struct capt_status_s *status;
 
-	capt_sendrecv(CAPT_GPIO, blinkonbuf, ARRAY_SIZE(blinkonbuf), NULL, 0);
+	/* Determine error type and use appropriate GPIO LED pattern.
+	 * From USB capture analysis:
+	 *   Paper jam:  GPIO 00 00 06 00 00 00 00 00 00 00 01 00
+	 *   No paper:   GPIO 00 00 01 02 01 00 00 00 00 00 01 00
+	 * Both are followed by CMD_E0A6(0x0000) during error wait */
+	status = lbp2900_get_status(state->ops);
+	if (FLAG(status, CAPT_FL_PAPERJAM) || FLAG(status, CAPT_FL_JAMERR)) {
+		fprintf(stderr, "DEBUG: CAPT: signaling paper jam via GPIO\n");
+		capt_sendrecv(CAPT_GPIO, jambuf, ARRAY_SIZE(jambuf), NULL, 0);
+	} else {
+		fprintf(stderr, "DEBUG: CAPT: signaling no paper via GPIO\n");
+		capt_sendrecv(CAPT_GPIO, blinkonbuf, ARRAY_SIZE(blinkonbuf), NULL, 0);
+	}
 	lbp2900_wait_ready(state->ops);
 
+	/* Send CAPT_RESET(0x0000) - seen in USB captures during both
+	 * paper jam and no-paper error recovery sequences, as well as
+	 * normal print initialization */
+	uint8_t dummy[2] = {0x00, 0x00};
+	capt_sendrecv(CAPT_RESET, dummy, sizeof(dummy), NULL, 0);
+
+	/* Wait for error to be cleared (paper loaded / jam fixed / cover closed).
+	 * USB captures show: PAPERJAM (s2 bit 14) clears, goes through
+	 * COVEROPEN (s2 bit 12) transitionally, then s2=0 when fully clear.
+	 * For no-paper: nERROR (s2 bit 7) is the signal for button/ready. */
 	while (1) {
-		const struct capt_status_s *status = lbp2900_get_status(state->ops);
+		status = lbp2900_get_status(state->ops);
+		/* Check if jam/cover error has cleared */
+		if (!FLAG(status, CAPT_FL_PAPERJAM) && !FLAG(status, CAPT_FL_JAMERR)
+		    && !FLAG(status, CAPT_FL_COVEROPEN)) {
+			/* For jam recovery: s2 goes 4100→1000→0000 (all clear) */
+			fprintf(stderr, "DEBUG: CAPT: error cleared\n");
+			break;
+		}
 		if (FLAG(status, CAPT_FL_BUTTON)) {
 			fprintf(stderr, "DEBUG: CAPT: button pressed\n");
-//			break;
 		}
 		if (FLAG(status, CAPT_FL_nERROR)) {
 			fprintf(stderr, "DEBUG: CAPT: virtual button pressed\n");
@@ -498,8 +547,26 @@ static void lbp2900_wait_user(struct printer_state_s *state)
 		sleep(1);
 	}
 
+	/* Turn off LED */
 	capt_sendrecv(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf), NULL, 0);
 	lbp2900_wait_ready(state->ops);
+}
+
+static void lbp2900_cancel_job(struct printer_state_s *state)
+{
+	uint8_t jbuf[2] = { LO(job), HI(job) };
+
+	/* USB capture shows cancel sequence:
+	 * JOB_SETUP fg=4 (cancel) → START_2 → JOB_END
+	 * fg=4 sets buf[4]=0x00 (no data flag) */
+	fprintf(stderr, "DEBUG: CAPT: sending cancel (fg=4) to printer\n");
+	send_job_start(state, 4, 0);
+	lbp2900_wait_ready(state->ops);
+
+	capt_sendrecv(CAPT_START_2, NULL, 0, NULL, 0);
+	lbp2900_wait_ready(state->ops);
+
+	capt_sendrecv(CAPT_JOB_END, jbuf, 2, NULL, 0);
 }
 
 static struct lbp2900_ops_s lbp2900_ops = {
@@ -512,6 +579,7 @@ static struct lbp2900_ops_s lbp2900_ops = {
 		.compress_band = ops_compress_band_hiscoa,
 		.send_band = ops_send_band_hiscoa,
 		.wait_user = lbp2900_wait_user,
+		.cancel_job = lbp2900_cancel_job,
 	},
 	.get_status = capt_get_xstatus,
 	.wait_ready = capt_wait_ready,
@@ -527,6 +595,7 @@ static struct lbp2900_ops_s lbp3000_ops = {
 		.compress_band = ops_compress_band_hiscoa,
 		.send_band = ops_send_band_hiscoa,
 		.wait_user = lbp2900_wait_user,
+		.cancel_job = lbp2900_cancel_job,
 	},
 	.get_status = capt_get_xstatus,
 	.wait_ready = capt_wait_ready,
@@ -545,6 +614,7 @@ static struct lbp2900_ops_s lbp3010_ops = {
 		.compress_band = ops_compress_band_hiscoa,
 		.send_band = ops_send_band_hiscoa,
 		.wait_user = lbp2900_wait_user,
+		.cancel_job = lbp2900_cancel_job,
 	},
 	.get_status = capt_get_xstatus_only,
 	.wait_ready = capt_wait_xready_only,

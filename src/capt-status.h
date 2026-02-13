@@ -54,9 +54,12 @@ enum capt_flags
 	/* status[2] */
 	CAPT_FL_nERROR       = _FL(2, 7),
 	CAPT_FL_BUTTON1      = _FL(2, 8),
+	CAPT_FL_COVEROPEN    = _FL(2, 12), /* cover open / recovering from jam */
+	CAPT_FL_PAPERJAM     = _FL(2, 14), /* paper jam or cover open error */
 	/* status[3] */
 	CAPT_FL_POWERUP1     = _FL(3, 12),
 	/* status[4] */
+	CAPT_FL_JAMERR       = _FL(4, 7),  /* accompanies jam/cover errors */
 	/* status[5] */
 	/* status[6] */
 };

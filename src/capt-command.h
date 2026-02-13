@@ -47,6 +47,7 @@ enum capt_command {
 	CAPT_START_1    = 0xE0A3,
 	CAPT_START_3    = 0xE0A4,
 	CAPT_UPLOAD_2   = 0xE0A5,
+	CAPT_RESET      = 0xE0A6, /* sent during error recovery and normal init */
 	CAPT_FIRE       = 0xE0A7,
 	CAPT_JOB_END    = 0xE0A9,
 

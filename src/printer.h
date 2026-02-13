@@ -47,6 +47,7 @@ struct printer_state_s {
 	unsigned iband;
 	unsigned isend;
 	uint16_t last_fired_page;              /* Last page number passed to FIRE, for fg=6 at job end */
+	bool is_retry;                         /* True when retrying after error (uses fg=2 in JOB_SETUP) */
 	struct print_options_s options; /* Print options from CUPS */
 };
 
@@ -64,6 +65,7 @@ struct printer_ops_s {
 		const void *pixels, unsigned line_size, unsigned num_lines);
 	void (*send_band) (struct printer_state_s *state, const void *band, size_t size);
 	void (*wait_user) (struct printer_state_s *state);
+	void (*cancel_job) (struct printer_state_s *state);
 };
 
 const struct printer_ops_s *printer_detect(void);

@@ -213,7 +213,11 @@ static void do_print(int fd)
 
 		/* Check for job cancellation */
 		if (g_job_cancelled) {
-			fprintf(stderr, "DEBUG: CAPT: Job cancelled, cleaning up\n");
+			fprintf(stderr, "DEBUG: CAPT: Job cancelled, sending cancel to printer\n");
+			if (in_job && ops->cancel_job) {
+				ops->cancel_job(state);
+				in_job = false;
+			}
 			break;
 		}
 
@@ -256,6 +260,7 @@ static void do_print(int fd)
 						ops->job_epilogue(state);
 					in_job = false;
 				}
+				state->is_retry = true;
 				continue;
 			}
 		}
@@ -269,6 +274,15 @@ static void do_print(int fd)
 			if (! ok) {
 				fprintf(stderr, "DEBUG: CAPT: rastertocapt: page not printed\n");
 				ops->wait_user(state);
+				/* End the current job and set retry flag for fg=2.
+				 * USB captures show after error recovery:
+				 * JOB_SETUP(fg=6) + JOB_END → JOB_BEGIN + JOB_SETUP(fg=2) */
+				if (in_job) {
+					if (ops->job_epilogue)
+						ops->job_epilogue(state);
+					in_job = false;
+				}
+				state->is_retry = true;
 				continue;
 			}
 		}

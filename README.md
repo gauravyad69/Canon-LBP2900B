@@ -98,6 +98,9 @@ lpinfo -v | grep -i canon
 
 # Add printer (replace usb://... with your device URI)
 sudo lpadmin -p LBP2900 -E -v "usb://Canon/LBP2900?serial=..." -m Canon-LBP-2900.ppd
+
+# Optional: Reject jobs when printer is offline (recommended)
+sudo lpadmin -p Canon-LBP2900 -o printer-error-policy=abort-job
 ```
 
 ## Configuration Options

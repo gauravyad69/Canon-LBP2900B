@@ -76,11 +76,23 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 	const char *hostname = state->options.hostname;
 	const char *username = state->options.username;
 	const char *doc_name = state->options.doc_name;
+	const size_t host_max = 32;
+	const size_t user_max = 32;
+	const size_t doc_max = 64;
 
 	/* Calculate UTF-16LE string lengths in bytes */
-	uint16_t ml = (uint16_t)(strlen(hostname) * 2);
-	uint16_t ul = (uint16_t)(strlen(username) * 2);
-	uint16_t nl = (uint16_t)(strlen(doc_name) * 2);
+	size_t host_len = strlen(hostname);
+	size_t user_len = strlen(username);
+	size_t doc_len = strlen(doc_name);
+	if (host_len > host_max)
+		host_len = host_max;
+	if (user_len > user_max)
+		user_len = user_max;
+	if (doc_len > doc_max)
+		doc_len = doc_max;
+	uint16_t ml = (uint16_t)(host_len * 2);
+	uint16_t ul = (uint16_t)(user_len * 2);
+	uint16_t nl = (uint16_t)(doc_len * 2);
 
 	time_t rawtime = time(NULL);
 	const struct tm *tm = localtime(&rawtime);
@@ -106,8 +118,8 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 	buf[18] = LO(job); buf[19] = HI(job);
 	buf[20] = 0xC4; buf[21] = 0xFF;       /* -60 timezone offset */
 	buf[22] = 0x88; buf[23] = 0xFF;       /* -120 */
-	buf[24] = LO(tm->tm_year); buf[25] = HI(tm->tm_year);
-	buf[26] = (uint8_t)tm->tm_mon;
+	buf[24] = LO(tm->tm_year + 1900); buf[25] = HI(tm->tm_year + 1900);
+	buf[26] = (uint8_t)(tm->tm_mon + 1);
 	buf[27] = (uint8_t)tm->tm_mday;
 	buf[28] = (uint8_t)tm->tm_hour;
 	buf[29] = (uint8_t)tm->tm_min;
@@ -118,11 +130,11 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 
 	/* Write UTF-16LE strings at offset 72 */
 	size_t offset = 72;
-	ascii_to_utf16le(buf + offset, hostname, 32);
+	ascii_to_utf16le(buf + offset, hostname, host_max);
 	offset += ml;
-	ascii_to_utf16le(buf + offset, username, 32);
+	ascii_to_utf16le(buf + offset, username, user_max);
 	offset += ul;
-	ascii_to_utf16le(buf + offset, doc_name, 64);
+	ascii_to_utf16le(buf + offset, doc_name, doc_max);
 
 	fprintf(stderr, "DEBUG: CAPT: Job setup - Host: %s, User: %s, Doc: %s\n",
 		hostname, username, doc_name);
@@ -174,6 +186,10 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 
 	send_job_start(state, 1, 0);
 	lbp2900_wait_ready(state->ops);
+
+	/* 0xE0A6 command seen in Windows USB capture (frame 85) after JOB_SETUP fg=1 */
+	uint8_t e0a6_buf[2] = {0, 0};
+	capt_sendrecv(0xE0A6, e0a6_buf, sizeof(e0a6_buf), NULL, 0);
 }
 
 static void lbp3000_job_prologue(struct printer_state_s *state)
@@ -319,33 +335,48 @@ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct pa
 
 	capt_send(CAPT_PRINT_DATA_END, NULL, 0);
 
-	/* waiting until the page is received */
+	/* Wait until the page data is received by the printer */
 	while (1) {
-	  sleep(1);
-	  status = lbp2900_get_status(state->ops);
-	  if (status->page_received == status->page_decoding)
-	    break;
+		sleep(1);
+		status = lbp2900_get_status(state->ops);
+		if (status->page_received == status->page_decoding)
+			break;
 	}
-	send_job_start(state, 2, status->page_decoding);
-	lbp2900_wait_ready(state->ops);
+
+	/*
+	 * Per Windows USB capture analysis:
+	 * - fg=2 (JOB_SETUP) is NEVER sent by Windows — it may trigger
+	 *   a spurious paper pre-fetch, causing jams. Removed.
+	 * - fg=6 is sent ONLY ONCE at job end (in job_epilogue).
+	 * - The page_out wait is essential to let the printer physically
+	 *   eject each page before the next page_prologue sends SET_PARMS,
+	 *   which itself can trigger a paper pull.
+	 */
 
 	uint8_t buf[2] = { LO(status->page_decoding), HI(status->page_decoding) };
 	capt_sendrecv(CAPT_FIRE, buf, 2, NULL, 0);
-	lbp2900_wait_ready(state->ops);
 
-	send_job_start(state, 6, status->page_decoding);
+	/* Track last fired page for fg=6 in job_epilogue */
+	state->last_fired_page = status->page_decoding;
 
+	fprintf(stderr, "DEBUG: CAPT: fired page %u\n", status->page_decoding);
+
+	/*
+	 * Wait for physical page ejection before allowing next page.
+	 *
+	 * IMPORTANT: Do NOT check NOPAPER flags here. When the last sheet
+	 * is pulled from the paper tray, NOPAPER1/NOPAPER2 go true transiently
+	 * while the page is still physically moving through the fuser. The old
+	 * code returned false on NOPAPER, which caused rastertocapt to retry
+	 * the already-fired page, jamming the printer.
+	 *
+	 * If a real jam occurs, page_out will never advance and the job_epilogue
+	 * wait (page_completed) will eventually be cancelled by CUPS timeout.
+	 */
 	while (1) {
 		const struct capt_status_s *status = lbp2900_get_status(state->ops);
-		/* Interesting. Using page_printing here results in shifted print */
 		if (status->page_out == status->page_decoding)
 			return true;
-		if (FLAG(status, CAPT_FL_NOPAPER2) || FLAG(status, CAPT_FL_NOPAPER1)) {
-			fprintf(stderr, "DEBUG: CAPT: no paper\n");
-			if (FLAG(status, CAPT_FL_PRINTING) || FLAG(status, CAPT_FL_PROCESSING1))
-				continue;
-			return false;
-		}
 		sleep(1);
 	}
 }
@@ -354,12 +385,23 @@ static void lbp2900_job_epilogue(struct printer_state_s *state)
 {
 	uint8_t jbuf[2] = { LO(job), HI(job) };
 
+	/*
+	 * Per Windows driver USB capture (frame 551→555→559):
+	 * After the last FIRE, fg=6 is sent IMMEDIATELY, then JOB_END.
+	 * The Windows driver does NOT wait for page_completed before fg=6.
+	 * Sequence: FIRE(last) → JOB_SETUP(fg=6) → JOB_END
+	 * Then it polls CHKXSTATUS/CHKJOBSTAT after JOB_END.
+	 */
+	send_job_start(state, 6, state->last_fired_page);
+
+	/* Now wait for all pages to complete before closing the job */
 	while (1) {
 		const struct capt_status_s *status = lbp2900_get_status(state->ops);
 		if (status->page_completed == status->page_decoding)
 			break;
 		sleep(1);
 	}
+
 	capt_sendrecv(CAPT_JOB_END, jbuf, 2, NULL, 0);
 }
 

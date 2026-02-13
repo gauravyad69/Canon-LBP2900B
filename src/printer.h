@@ -46,6 +46,7 @@ struct printer_state_s {
 	unsigned ipage;
 	unsigned iband;
 	unsigned isend;
+	uint16_t last_fired_page;              /* Last page number passed to FIRE, for fg=6 at job end */
 	struct print_options_s options; /* Print options from CUPS */
 };
 

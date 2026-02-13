@@ -265,23 +265,25 @@ static uint8_t get_paper_size_code(unsigned width, unsigned height)
 	 * 0x0C = Legal     (5078 x 8400)  [confirmed by capture: code 0x0C]
 	 * 0x04 = Executive (4350 x 6300)
 	 * 0x05 = A5        (3496 x 4960)
-	 * 0x06 = B5        (4298 x 6070)
-	 * 0x07 = Com10     (2474 x 5700)  envelope
-	 * 0x08 = Monarch   (2324 x 4500)  envelope
-	 * 0x09 = C5        (3826 x 5408)  envelope
-	 * 0x0A = DL        (2598 x 5196)  envelope
-	 * 0x0B = Index     (1800 x 2400)  3x5 card
+	 * 0x06 = B5        (4300 x 6075)
+	 * 0x07 = Com10     (2475 x 5700)  envelope
+	 * 0x08 = Monarch   (2325 x 4500)  envelope
+	 * 0x09 = C5        (3825 x 5408)  envelope
+	 * 0x0A = DL        (2600 x 5200)  envelope
+	 * 0x0B = Index     (1800 x 3000)  3x5 card
 	 * 0x13 = Manual    (custom)       [confirmed by capture]
 	 *
-	 * We use width to identify since it varies more between sizes
+	 * Width thresholds chosen as midpoints between adjacent sizes.
+	 * PPD pixel widths (at 600dpi): Index=1800, Monarch=2325,
+	 * Com10=2475, DL=2600, A5=3500, C5=3825, B5=4300, Exec=4350, A4=4958
 	 */
 	if (width <= 1900)                          return 0x0B; /* Index Card 3x5 */
 	if (width <= 2400)                          return 0x08; /* Monarch */
-	if (width <= 2550)                          return 0x0A; /* DL Envelope */
-	if (width <= 2600)                          return 0x07; /* Com10 */
+	if (width <= 2550)                          return 0x07; /* Com10 */
+	if (width <= 2650)                          return 0x0A; /* DL Envelope */
 	if (width <= 3600)                          return 0x05; /* A5 */
 	if (width <= 3900)                          return 0x09; /* C5 Envelope */
-	if (width <= 4350)                          return 0x06; /* B5 */
+	if (width <= 4320)                          return 0x06; /* B5 */
 	if (width <= 4450)                          return 0x04; /* Executive */
 	if (width <= 5000)                          return 0x02; /* A4 */
 	if (height <= 6700)                         return 0x0D; /* Letter */
@@ -297,7 +299,24 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	uint8_t paper_type = state->options.paper_type; /* 0=Plain, 1=Heavy, 2=HeavyH, 3=PlainL, 4=ohp, 5=Envelope */
 	if (paper_type > 5) paper_type = 0; /* default to Plain if invalid */
 	uint8_t save = state->options.toner_save ? 0x01 : 0x00;
-	uint8_t pt2 = 0x01;
+
+	/* byte[36] "paper type B" - secondary paper type encoding.
+	 * Confirmed from USB captures:
+	 *   Plain (type=0)  → 0x01 (SPECS: "01=plain")
+	 *   Heavy (type=1)  → 0x02 (SPECS: "02=thick")
+	 *   Envelope (type=5) → 0x1C (Manual capture: paper_type=0x05, pt2=0x1C)
+	 * Toner save does NOT affect pt2 — the capture showing pt2=0x02 with
+	 * toner_save=1 also had paper_type=Heavy, so pt2=0x02 is from Heavy.
+	 * Values for HeavyH/PlainL/ohp are interpolated from the pattern. */
+	static const uint8_t pt2_map[] = {
+		0x01,  /* 0: Plain    → confirmed by capture */
+		0x02,  /* 1: Heavy    → confirmed by capture + SPECS */
+		0x02,  /* 2: HeavyH   → same as Heavy (thicker variant) */
+		0x01,  /* 3: PlainL   → same as Plain (lighter variant) */
+		0x04,  /* 4: ohp      → transparency (inferred) */
+		0x1C,  /* 5: Envelope → confirmed by capture */
+	};
+	uint8_t pt2 = pt2_map[paper_type];
 
 	/* Toner density: 1=Lightest, 2=Light, 3=Normal, 4=Dark, 5=Darkest
 	 * From USB captures: only byte[8] changes, bytes[9-11] stay 0x1F.
@@ -306,9 +325,6 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	if (density_level < 1 || density_level > 5) density_level = 3; /* default to Normal */
 	static const uint8_t density_map[] = { 0x1F, 0x00, 0x10, 0x1F, 0x2F, 0x3F };
 	uint8_t density = density_map[density_level];
-
-	/* When toner save is on, captures show byte[36] changes to 0x02 */
-	if (save) pt2 = 0x02;
 
 	/* Get paper size code based on page dimensions */
 	uint8_t paper_code = get_paper_size_code(dims->paper_width, dims->paper_height);
@@ -325,7 +341,7 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	 * [6-7]   reserved (0x0000)
 	 * [8]     toner density (0x00=Lightest, 0x1F=Normal, 0x3F=Darkest)
 	 * [9-11]  always 0x1F 0x1F 0x1F
-	 * [12]    paper type (0x00=Plain, 0x01=PlainL, 0x05=Envelope)
+	 * [12]    paper type (0x00=Plain, 0x01=Heavy, 0x02=HeavyH, 0x03=PlainL, 0x04=ohp, 0x05=Envelope)
 	 * [13-18] fixed: 0x11 0x04 0x00 0x01 0x01 0x02
 	 * [19]    toner save (0x00=OFF, 0x01=ON)
 	 * [20-25] fixed: 0x01 0x00 0x78 0x00 0x60 0x00
@@ -334,7 +350,7 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	 * [30-31] paper width pixels (LE16)
 	 * [32-33] paper height pixels (LE16)
 	 * [34-35] reserved (0x0000)
-	 * [36]    page type extra (0x01=normal, 0x02=tonerSave)
+	 * [36]    paper type B (0x01=Plain/PlainL, 0x02=Heavy/HeavyH, 0x1C=Envelope)
 	 * [37-39] reserved (0x000000)
 	 */
 	uint8_t pageparms[] = {
@@ -458,18 +474,28 @@ static void lbp2900_page_setup(struct printer_state_s *state,
 	/*
 	 * Raster dimensions per SPECS file + USB capture verification:
 	 *   A4         4736 x 6776  (line_size=592)  [capture confirmed]
-	 *   Letter     4864 x 6368  (line_size=608)  [SPECS]
+	 *   Letter     4864 x 6362  (line_size=608)  [SPECS]
 	 *   Legal      4864 x 8162  (line_size=608)  [capture confirmed]
-	 *   Executive  4128 x 6080  (line_size=516)
-	 *   A5         3392 x 4736  (line_size=424)
-	 *   B5         4096 x 5824  (line_size=512)
-	 *   Index 3x5  1344 x 2528  (line_size=168)
+	 *   Executive  4128 x 6062  (line_size=516)
+	 *   A5         3392 x 4720  (line_size=424)
+	 *   B5         4096 x 5837  (line_size=512)
+	 *   C5 Env.    3392 x 5170  (line_size=424)
+	 *   Com10 Env. 2400 x 5462  (line_size=300)
+	 *   DL Env.    2400 x 4962  (line_size=300)
+	 *   Monarch    2400 x 4262  (line_size=300)
+	 *   Index 3x5  1344 x 2762  (line_size=168)
 	 *
-	 * Paper width determines line_size:
-	 *   width <= 4960 (A4/smaller) → 4736 pixels → 592 bytes
-	 *   width > 4960 (Letter/Legal) → 4864 pixels → 608 bytes
+	 * Raster width brackets (by paper pixel width):
+	 *   Index (1800)                  → 1344 pixels → 168 bytes
+	 *   Monarch/Com10/DL (2325-2600)  → 2400 pixels → 300 bytes
+	 *   A5/C5 (3500-3825)             → 3392 pixels → 424 bytes
+	 *   B5 (4300)                     → 4096 pixels → 512 bytes
+	 *   Executive (4350)              → 4128 pixels → 516 bytes
+	 *   A4 (4958)                     → 4736 pixels → 592 bytes
+	 *   Letter/Legal (5100)           → 4864 pixels → 608 bytes
 	 *
 	 * Max num_lines = paper_height - 238 pixel margin (10mm)
+	 * [margin confirmed universal across A4, Legal, Manual captures]
 	 */
 	unsigned max_raster_width;
 	unsigned max_lines;
@@ -482,19 +508,22 @@ static void lbp2900_page_setup(struct printer_state_s *state,
 		/* Letter, Legal, and wider sizes */
 		max_raster_width = 4864;
 	} else if (dims->paper_width > 4350) {
-		/* A4 and B5 range */
+		/* A4 range */
 		max_raster_width = 4736;
-	} else if (dims->paper_width > 3600) {
-		/* Executive range */
+	} else if (dims->paper_width > 4320) {
+		/* Executive range (4350px) */
 		max_raster_width = 4128;
+	} else if (dims->paper_width > 3900) {
+		/* B5 range (4300px) */
+		max_raster_width = 4096;
 	} else if (dims->paper_width > 2600) {
-		/* A5 range */
+		/* A5 and C5 range (3500-3825px) */
 		max_raster_width = 3392;
 	} else if (dims->paper_width > 1900) {
-		/* Envelope range */
+		/* Envelope range: Monarch/Com10/DL (2325-2600px) */
 		max_raster_width = 2400;
 	} else {
-		/* Index card range */
+		/* Index card range (1800px) */
 		max_raster_width = 1344;
 	}
 

@@ -23,6 +23,7 @@
 13. [Error/Recovery Scenarios](#13-errorrecovery-scenarios)
 14. [JOB_BEGIN Retry Format](#14-job_begin-retry-format)
 15. [Implementation Status](#15-implementation-status)
+16. [Paper Size / Special Media Handling](#16-paper-size--special-media-handling)
 
 ---
 
@@ -208,13 +209,13 @@ Offset  Size  Field                Values seen
 ------  ----  -------------------  ----------------------------------------
  0-1    2     Page counter (LE16)  0x0000-0x0006 (increments per page/job)
  2-3    2     Magic                Always 0x312A
- 4-5    2     Paper size (LE16)    0x0002=Letter, 0x000C=16K, 0x0013=Manual(?)
+ 4-5    2     Paper size (LE16)    0x02=A4, 0x0D=Letter, 0x0C=Legal, 0x13=Manual (see table)
  6-7    2     (reserved)           Always 0x0000
  8      1     Toner density        0x00=Lightest, 0x1F=Normal, 0x3F=Darkest
- 9      1     (copy of byte 8?)    Usually same as byte 8
-10      1     (copy of byte 8?)    Usually same as byte 8
-11      1     (copy of byte 8?)    Usually same as byte 8
-12      1     Paper type           0x00=Plain, 0x01=Plain_L, 0x05=Envelope
+ 9      1     Fixed                Always 0x1F (not a copy of byte 8)
+10      1     Fixed                Always 0x1F
+11      1     Fixed                Always 0x1F
+12      1     Paper type           0x00=Plain, 0x01=Heavy, 0x02=HeavyH, 0x03=PlainL, 0x04=ohp, 0x05=Envelope
 13-18   6     Fixed params         Always: 11 04 00 01 01 02
 19      1     Toner save           0x00=OFF, 0x01=ON
 20-25   6     Fixed params         Always: 01 00 78 00 60 00
@@ -224,33 +225,47 @@ Offset  Size  Field                Values seen
 32-33   2     Paper height (LE16)  Pixels (e.g. 7014, 8400)
 34      1     (reserved)           Always 0x00
 35      1     (reserved)           Always 0x00
-36      1     Page type extra      0x01 (default), 0x02 (tonerSave/IndexCard), 0x1C (manual)
+36      1     Paper type B         0x01=Plain/PlainL, 0x02=Heavy/HeavyH, 0x1C=Envelope
 37-39   3     (reserved)           Always 0x000000
 ```
 
 ### Paper Size Codes
 
-| Code   | Paper Size |
-|--------|-----------|
-| 0x0002 | Letter (4960×7014 px, line_sz=592) |
-| 0x000C | 16K (5100×8400 px, line_sz=592) |
-| 0x0013 | Manual/Custom (5078×8400 px, line_sz=608) |
+| Code   | Paper Size | Dimensions (px) | Line Size |
+|--------|-----------|-----------------|-----------|
+| 0x02   | A4        | 4958 × 7016     | 592       |
+| 0x04   | Executive | 4350 × 6300     | 516       |
+| 0x05   | A5        | 3500 × 4958     | 424       |
+| 0x06   | B5        | 4300 × 6075     | 512       |
+| 0x07   | Com10     | 2475 × 5700     | 300       |
+| 0x08   | Monarch   | 2325 × 4500     | 300       |
+| 0x09   | C5        | 3825 × 5408     | 424       |
+| 0x0A   | DL        | 2600 × 5200     | 300       |
+| 0x0B   | Index 3x5 | 1800 × 3000     | 168       |
+| 0x0C   | Legal     | 5100 × 8400     | 608       |
+| 0x0D   | Letter    | 5100 × 6600     | 608       |
+| 0x13   | Manual    | (custom)        | (varies)  |
 
 ### Paper Type Codes
 
-| Code | Type |
-|------|------|
-| 0x00 | Plain Paper |
-| 0x01 | Plain Paper L |
-| 0x05 | Envelope |
+| Code | Type | byte[36] (Paper Type B) |
+|------|------|------------------------|
+| 0x00 | Plain Paper | 0x01 |
+| 0x01 | Heavy Paper | 0x02 |
+| 0x02 | Heavy Paper H | 0x02 |
+| 0x03 | Plain Paper L | 0x01 |
+| 0x04 | Transparency (ohp) | 0x04 |
+| 0x05 | Envelope | 0x1C |
 
 ### Toner Density Values
 
-| Code | Density |
-|------|---------|
-| 0x00 | Lightest (all 4 bytes: 00 1f 1f 1f) |
-| 0x1F | Normal (all 4 bytes: 1f 1f 1f 1f) |
-| 0x3F | Darkest (all 4 bytes: 3f 1f 1f 1f) |
+| Code | Density | byte[8-11] |
+|------|---------|------------|
+| 0x00 | Lightest | 00 1F 1F 1F |
+| 0x10 | Light   | 10 1F 1F 1F |
+| 0x1F | Normal  | 1F 1F 1F 1F |
+| 0x2F | Dark    | 2F 1F 1F 1F |
+| 0x3F | Darkest | 3F 1F 1F 1F |
 
 ---
 
@@ -330,13 +345,12 @@ Both contain identical hostname/username/docname.
 ### 7.4 `change_pagesizeToLegalThenPrintTestPage.pcapng`
 - **Scenario**: Changed page size to Legal, printed test page
 - **JOB_SETUP**: Host=OPREKIN-PC, User=mrhell, Doc=Test Page, Time=2025-11-27 21:28:44
-- **Page Params**: **16K(0x0C)**, toner=Normal(0x1F), type=Plain, save=OFF, **5100×8400px**
-- **Note**: Paper code 0x0C corresponds to "16K" in the driver — likely the closest match for Legal in the CAPT driver's paper code table
+- **Page Params**: **Legal(0x0C)**, toner=Normal(0x1F), type=Plain, save=OFF, **5100×8400px**, line_sz=608
 
 ### 7.5 `increaseTonerDensityThenPrint.pcapng`
 - **Scenario**: Increased toner density to max, printed test page
 - **JOB_SETUP**: Host=OPREKIN-PC, User=mrhell, Doc=Test Page
-- **Page Params**: 16K(0x0C), **toner=0x3F (Darkest)**, type=Plain, save=OFF, 5100×8400px
+- **Page Params**: Legal(0x0C), **toner=0x3F (Darkest)**, type=Plain, save=OFF, 5100×8400px, line_sz=608
 - **Toner bytes**: `3f 1f 1f 1f` — only byte 8 changes, bytes 9-11 stay 0x1F
 
 ### 7.6 `outOfPaper-PressRedButtonAfterFeedingPaper.pcapng`
@@ -390,8 +404,8 @@ Both contain identical hostname/username/docname.
 - **Scenario**: IndexCard→A4, 2 pages/sheet, Heavy paper, Toner Save ON
 - **JOB_SETUP**: Host=OPREKIN-PC, User=mrhell, Doc=**Chrome Web Store**
   - byte4=0x00, byte16=0x01, byte17=0x02 (Chrome-initiated print)
-- **Page Params (×3 SET_PARMS)**: Letter, toner=Normal, type=**Plain_L(0x01)**, save=**ON**
-  - byte[36]=0x02 (instead of normal 0x01)
+- **Page Params (×3 SET_PARMS)**: A4(0x02), toner=Normal, type=**Heavy(0x01)**, save=**ON**
+  - byte[36]=0x02 (matches Heavy paper type, NOT toner_save — see Section 16)
   - 2 FIRE commands (pages 1, 2)
 - **GPIO**: `00 00 01 02 02 00 00 00 00 00 01 00` (non-zero, different pattern)
 - **Unknown 8000**: 1 occurrence, payload `b009b30d960000020000 0000`
@@ -401,7 +415,7 @@ Both contain identical hostname/username/docname.
 - **Scenario**: Chrome print 16 pages→1 sheet, paper jam, then fix
 - **JOB_SETUP**: Host=OPREKIN-PC, User=mrhell, Doc=**Constitution-of-Nepal_2072_Eng_www.moljpa.gov_.npDate-72_11_16.pdf**
   - Time=2025-11-27 23:02:43, byte16=0x01, byte17=0x02
-- **Page Params**: Letter, toner=Normal, type=**Plain_L**, save=**ON**, 4960×7014px
+- **Page Params**: A4(0x02), toner=Normal, type=**Heavy(0x01)**, save=**ON**, 4960×7014px
 - **FIRE**: payload `01 00` (1 page output despite 16 source pages — 16-up layout)
 - **c000 status blocks**: 70 occurrences during paper jam + recovery
 - **d000 status blocks**: 7 occurrences after jam resolved
@@ -449,12 +463,12 @@ Both contain identical hostname/username/docname.
 
 | Capture | Paper | Toner | Type | Save | Width×Height | Line Size | byte[0] | byte[36] |
 |---------|-------|-------|------|------|-------------|-----------|---------|----------|
-| Default prints (×6) | Letter(0x02) | Normal(0x1F) | Plain(0x00) | OFF | 4960×7014 | 592 | varies | 0x01 |
-| Legal (change_pagesize) | 16K(0x0C) | Normal(0x1F) | Plain(0x00) | OFF | 5100×8400 | 592 | 0x00 | 0x01 |
-| Toner+ (increaseToner) | 16K(0x0C) | **Dark(0x3F)** | Plain(0x00) | OFF | 5100×8400 | 592 | 0x01 | 0x01 |
-| IndexCard/TonerSave | Letter(0x02) | Normal(0x1F) | **Plain_L(0x01)** | **ON** | 4960×7014 | 592 | 0x04 | **0x02** |
-| Chrome/PaperJam | Letter(0x02) | Normal(0x1F) | **Plain_L(0x01)** | **ON** | 4960×7014 | 592 | 0x06 | **0x02** |
-| Manual/Landscape/Lightest | **Manual(0x13)** | **Light(0x00)** | **Envelope(0x05)** | OFF | **5078×8400** | **608** | 0x02 | **0x1C** |
+| Default prints (×6) | A4(0x02) | Normal(0x1F) | Plain(0x00) | OFF | 4960×7014 | 592 | varies | 0x01 |
+| Legal (change_pagesize) | Legal(0x0C) | Normal(0x1F) | Plain(0x00) | OFF | 5100×8400 | 608 | 0x00 | 0x01 |
+| Toner+ (increaseToner) | Legal(0x0C) | **Dark(0x3F)** | Plain(0x00) | OFF | 5100×8400 | 608 | 0x01 | 0x01 |
+| IndexCard→A4/TonerSave | A4(0x02) | Normal(0x1F) | **Heavy(0x01)** | **ON** | 4960×7014 | 592 | 0x04 | **0x02** |
+| Chrome/PaperJam | A4(0x02) | Normal(0x1F) | **Heavy(0x01)** | **ON** | 4960×7014 | 592 | 0x06 | **0x02** |
+| Manual/Landscape/Lightest | **Manual(0x13)** | **Lightest(0x00)** | **Envelope(0x05)** | OFF | **5078×8400** | **608** | 0x02 | **0x1C** |
 
 ---
 
@@ -809,8 +823,11 @@ Cross-reference of protocol features vs driver implementation in `src/prn_lbp290
 | SET_PARM_PAGE (40 bytes) | `prn_lbp2900.c` | Paper code, density, type, toner save, dimensions |
 | Paper size codes | `prn_lbp2900.c` | A4, Letter, Legal, A5, B5, Executive, envelopes, Index |
 | Toner density (0x00-0x3F) | `prn_lbp2900.c` | 5 levels mapped to capture values |
-| Toner save mode | `prn_lbp2900.c` | byte[19]=0x01, byte[36]=0x02 |
+| Toner save mode | `prn_lbp2900.c` | byte[19]=0x01 |
 | Paper type codes | `rastertocapt.c` | Plain, PlainL, Heavy, HeavyH, OHP, Envelope |
+| Paper type B (byte[36]) | `prn_lbp2900.c` | Maps paper_type→pt2: Plain→0x01, Heavy→0x02, Envelope→0x1C |
+| Paper size codes | `prn_lbp2900.c` | All 11 sizes + Manual correctly mapped by width threshold |
+| Raster dimensions | `prn_lbp2900.c` | Per-size raster width, line_size, 238px universal margin |
 | Multi-page printing | `prn_lbp2900.c` | Page counter in SET_PARMS, FIRE per page |
 | GPIO LED: no-paper blink | `prn_lbp2900.c` | `blinkonbuf` = `000001020100000000000100` |
 | GPIO LED: paper jam | `prn_lbp2900.c` | `jambuf` = `000006000000000000000001` |
@@ -869,3 +886,80 @@ status[5] (s5):  (no known flags)
 
 status[6] (s6):  (no known flags)
 ```
+
+---
+
+## 16. Paper Size / Special Media Handling
+
+### Index Card (3x5) — What the "IndexCard" Capture Actually Shows
+
+The capture named `PageSizeToIndexCard-OutputSizeToA4-...` does **NOT** show direct Index Card
+printing. The Windows driver was configured with `PageSize=IndexCard` and `OutputSize=A4`, meaning
+the driver **scaled** the index card content to A4 output. All SET_PARM_PAGE data in this capture
+uses A4 parameters:
+
+- `paper_code=0x02` (A4)
+- `paper_w=4960, paper_h=7014` (A4 dimensions)
+- `line_sz=592, num_lines=6776` (A4 raster)
+- 2 pages (`FIRE page=1, page=2`) — from "2 pages per sheet" layout
+
+**Conclusion**: When the user selects Index Card with "Output Size=A4", the OS/driver does the
+scaling — the printer only sees A4 raster data. Direct Index Card printing (where the printer
+receives 3x5 raster) has no USB capture, so those parameters come from the SPECS file.
+
+### Paper Type B (byte[36]) Discovery
+
+Previously thought to be toner_save-dependent. Analysis of the Manual capture reveals it tracks
+paper type, not toner save:
+
+| paper_type (byte[12]) | byte[36] | Capture Evidence |
+|----------------------|----------|------------------|
+| 0x00 Plain | 0x01 | A4 normal print |
+| 0x01 Heavy | 0x02 | IndexCard capture (Heavy+TonerSave, pt2=0x02) |
+| 0x05 Envelope | 0x1C | Manual capture (paper_type=0x05, pt2=0x1C, save=0) |
+
+The SPECS file independently documents this as "paper type B: 01=plain, 02=thick", which aligns
+with our captures. The previous implementation incorrectly tied byte[36] to toner_save — it
+happened to work because the only capture with byte[36]=0x02 also had toner_save=1 (coincidence:
+Heavy paper type produces the same value).
+
+### Raster Width Mapping (Corrected)
+
+Each paper size maps to a specific raster width. These are NOT the physical paper dimensions —
+they're the fixed raster buffer widths the printer expects:
+
+```
+Paper Width (px)    Raster Width    Line Size    Paper Sizes
+----------------    ------------    ---------    -----------
+    ≤ 1900             1344           168        Index Card (1800)
+ 1901 – 2600           2400           300        Monarch (2325), Com10 (2475), DL (2600)
+ 2601 – 3900           3392           424        A5 (3500), C5 (3825)
+ 3901 – 4320           4096           512        B5 (4300)
+ 4321 – 4350           4128           516        Executive (4350)
+ 4351 – 4960           4736           592        A4 (4958)
+    > 4960             4864           608        Letter (5100), Legal (5100)
+```
+
+### Bugs Fixed in This Analysis
+
+1. **Com10/DL codes swapped**: Com10 (2475px) was getting DL code (0x0A), DL (2600px) was getting
+   Com10 code (0x07). Threshold order corrected.
+
+2. **Executive got B5 code**: Executive (4350px) matched `<=4350` which returned B5 (0x06).
+   Threshold lowered to `<=4320` so B5 (4300px) still matches, Executive (4350px) falls through
+   to `<=4450` → 0x04 (Executive).
+
+3. **B5 used Executive raster width**: B5 (4300px) fell into `>3600` → 4128 (Executive raster).
+   Added separate threshold: `>3900` → 4096 (correct B5 raster).
+
+4. **byte[36] was toner_save-based**: Changed to paper_type-based mapping table:
+   Plain/PlainL→0x01, Heavy/HeavyH→0x02, Envelope→0x1C.
+
+### PPD UIConstraints for Index Card
+
+Index Card 3x5 is constrained against **all** media types except Envelope:
+- ❌ PlainPaper, PlainLPaper, ThickPaper, ThickPaperH, ohp
+- ✓ Envelope only
+
+This means in CUPS, users selecting Index Card will automatically use Envelope paper type
+(`paper_type=0x05, pt2=0x1C`), which is the correct printer behavior for small/special media.

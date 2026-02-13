@@ -73,29 +73,20 @@ static size_t ascii_to_utf16le(uint8_t *dest, const char *src, size_t max_chars)
 
 static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t page)
 {
+	(void) page;
 	const char *hostname = state->options.hostname;
 	const char *username = state->options.username;
 	const char *doc_name = state->options.doc_name;
-	const size_t host_max = 32;
-	const size_t user_max = 32;
-	const size_t doc_max = 64;
 
 	/* Calculate UTF-16LE string lengths in bytes */
-	size_t host_len = strlen(hostname);
-	size_t user_len = strlen(username);
-	size_t doc_len = strlen(doc_name);
-	if (host_len > host_max)
-		host_len = host_max;
-	if (user_len > user_max)
-		user_len = user_max;
-	if (doc_len > doc_max)
-		doc_len = doc_max;
-	uint16_t ml = (uint16_t)(host_len * 2);
-	uint16_t ul = (uint16_t)(user_len * 2);
-	uint16_t nl = (uint16_t)(doc_len * 2);
+	uint16_t ml = (uint16_t)(strlen(hostname) * 2);
+	uint16_t ul = (uint16_t)(strlen(username) * 2);
+	uint16_t nl = (uint16_t)(strlen(doc_name) * 2);
 
 	time_t rawtime = time(NULL);
 	const struct tm *tm = localtime(&rawtime);
+	uint16_t year = (uint16_t)(1900 + tm->tm_year);
+	uint8_t month = (uint8_t)(tm->tm_mon + 1);
 
 	/* Buffer: 32 byte header + 40 bytes reserved + strings */
 	size_t bufsize = 32 + 40 + ml + ul + nl;
@@ -106,35 +97,56 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 	}
 	memset(buf, 0, bufsize);
 
-	/* Build header (32 bytes) */
+	/* Build header (72 bytes) per USB capture analysis:
+	 * [0-3]   = 00 00 00 00
+	 * [4]     = phase flag: 0x01=has data, 0x00=cancel/cleanup
+	 * [5-7]   = 00 00 00
+	 * [8-9]   = hostname length (UTF-16LE bytes, LE16)
+	 * [10-11] = username length
+	 * [12-13] = docname length
+	 * [14-15] = 00 00
+	 * [16]    = job phase: 0x01=start, 0x04=cancel, 0x06=end
+	 * [17]    = 0x01 (standard print)
+	 * [18-19] = job ID (LE16)
+	 * [20-21] = 0x01E0 (480, resolution-related)
+	 * [22-23] = 0x01A4 (420, resolution-related)
+	 * [24-25] = year (LE16, e.g. 2025)
+	 * [26]    = month (1-12)
+	 * [27]    = day
+	 * [28]    = hour
+	 * [29]    = minute
+	 * [30]    = second
+	 * [31-71] = zero padding
+	 * [72+]   = UTF-16LE strings: hostname, username, docname
+	 */
 	buf[0] = 0x00; buf[1] = 0x00; buf[2] = 0x00; buf[3] = 0x00;
-	buf[4] = LO(page); buf[5] = HI(page);
-	buf[6] = 0x00; buf[7] = 0x00;
+	buf[4] = (fg == 0x04) ? 0x00 : 0x01; /* phase flag: 1=has data, 0=cancel */
+	buf[5] = 0x00; buf[6] = 0x00; buf[7] = 0x00;
 	buf[8] = LO(ml); buf[9] = HI(ml);     /* Hostname length (UTF-16LE bytes) */
 	buf[10] = LO(ul); buf[11] = HI(ul);   /* Username length */
 	buf[12] = LO(nl); buf[13] = HI(nl);   /* Doc name length */
 	buf[14] = 0x00; buf[15] = 0x00;
 	buf[16] = fg; buf[17] = 0x01;
 	buf[18] = LO(job); buf[19] = HI(job);
-	buf[20] = 0xC4; buf[21] = 0xFF;       /* -60 timezone offset */
-	buf[22] = 0x88; buf[23] = 0xFF;       /* -120 */
-	buf[24] = LO(tm->tm_year + 1900); buf[25] = HI(tm->tm_year + 1900);
-	buf[26] = (uint8_t)(tm->tm_mon + 1);
+	buf[20] = 0xE0; buf[21] = 0x01;       /* 480 (0x01E0) - resolution related */
+	buf[22] = 0xA4; buf[23] = 0x01;       /* 420 (0x01A4) - resolution related */
+	buf[24] = LO(year); buf[25] = HI(year);
+	buf[26] = month;
 	buf[27] = (uint8_t)tm->tm_mday;
 	buf[28] = (uint8_t)tm->tm_hour;
 	buf[29] = (uint8_t)tm->tm_min;
 	buf[30] = (uint8_t)tm->tm_sec;
-	buf[31] = 0x01;
+	/* buf[31..71] = 0x00 (already zeroed by memset) */
 
 	/* Reserved area (40 bytes) at offset 32, already zeroed */
 
 	/* Write UTF-16LE strings at offset 72 */
 	size_t offset = 72;
-	ascii_to_utf16le(buf + offset, hostname, host_max);
+	ascii_to_utf16le(buf + offset, hostname, 32);
 	offset += ml;
-	ascii_to_utf16le(buf + offset, username, user_max);
+	ascii_to_utf16le(buf + offset, username, 32);
 	offset += ul;
-	ascii_to_utf16le(buf + offset, doc_name, doc_max);
+	ascii_to_utf16le(buf + offset, doc_name, 64);
 
 	fprintf(stderr, "DEBUG: CAPT: Job setup - Host: %s, User: %s, Doc: %s\n",
 		hostname, username, doc_name);
@@ -186,10 +198,6 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 
 	send_job_start(state, 1, 0);
 	lbp2900_wait_ready(state->ops);
-
-	/* 0xE0A6 command seen in Windows USB capture (frame 85) after JOB_SETUP fg=1 */
-	uint8_t e0a6_buf[2] = {0, 0};
-	capt_sendrecv(0xE0A6, e0a6_buf, sizeof(e0a6_buf), NULL, 0);
 }
 
 static void lbp3000_job_prologue(struct printer_state_s *state)
@@ -220,18 +228,19 @@ static void lbp3000_job_prologue(struct printer_state_s *state)
 static uint8_t get_paper_size_code(unsigned width, unsigned height)
 {
 	/*
-	 * Paper size codes from Windows capture analysis:
-	 * 0x01 = A4        (4960 x 7014)
-	 * 0x02 = Letter    (5100 x 6600)
-	 * 0x03 = Legal     (5100 x 8400)
+	 * Paper size codes from SPECS file + USB capture verification:
+	 * 0x02 = A4        (4960 x 7014)  [confirmed by SPECS + capture]
+	 * 0x0D = Letter    (5100 x 6600)  [confirmed by SPECS: "letter=0d"]
+	 * 0x0C = Legal     (5078 x 8400)  [confirmed by capture: code 0x0C]
 	 * 0x04 = Executive (4350 x 6300)
 	 * 0x05 = A5        (3496 x 4960)
 	 * 0x06 = B5        (4298 x 6070)
-	 * 0x07 = Com10     (2474 x 5700) envelope
-	 * 0x08 = Monarch   (2324 x 4500) envelope
-	 * 0x09 = C5        (3826 x 5408) envelope
-	 * 0x0A = DL        (2598 x 5196) envelope
-	 * 0x0B = Index     (1800 x 2400) 3x5 card
+	 * 0x07 = Com10     (2474 x 5700)  envelope
+	 * 0x08 = Monarch   (2324 x 4500)  envelope
+	 * 0x09 = C5        (3826 x 5408)  envelope
+	 * 0x0A = DL        (2598 x 5196)  envelope
+	 * 0x0B = Index     (1800 x 2400)  3x5 card
+	 * 0x13 = Manual    (custom)       [confirmed by capture]
 	 *
 	 * We use width to identify since it varies more between sizes
 	 */
@@ -243,9 +252,9 @@ static uint8_t get_paper_size_code(unsigned width, unsigned height)
 	if (width <= 3900)                          return 0x09; /* C5 Envelope */
 	if (width <= 4350)                          return 0x06; /* B5 */
 	if (width <= 4450)                          return 0x04; /* Executive */
-	if (width <= 5000)                          return 0x01; /* A4 */
-	if (height <= 6700)                         return 0x02; /* Letter */
-	return 0x03; /* Legal (widest standard size) */
+	if (width <= 5000)                          return 0x02; /* A4 */
+	if (height <= 6700)                         return 0x0D; /* Letter */
+	return 0x0C; /* Legal */
 }
 
 static bool lbp2900_page_prologue(struct printer_state_s *state, const struct page_dims_s *dims)
@@ -258,38 +267,54 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 	if (paper_type > 5) paper_type = 0; /* default to Plain if invalid */
 	uint8_t save = state->options.toner_save ? 0x01 : 0x00;
 	uint8_t pt2 = 0x01;
-	
-	/* Toner density: 1=Lightest, 2=Light, 3=Normal, 4=Dark, 5=Darkest */
-	/* Map to density byte: observed values range from ~0x0F (lightest) to ~0x3F (darkest) */
+
+	/* Toner density: 1=Lightest, 2=Light, 3=Normal, 4=Dark, 5=Darkest
+	 * From USB captures: only byte[8] changes, bytes[9-11] stay 0x1F.
+	 * Confirmed values: Lightest=0x00, Normal=0x1F, Darkest=0x3F */
 	uint8_t density_level = state->options.toner_density;
 	if (density_level < 1 || density_level > 5) density_level = 3; /* default to Normal */
-	/* Density values: 1->0x0F, 2->0x17, 3->0x1F, 4->0x2F, 5->0x3F */
-	static const uint8_t density_map[] = { 0x1F, 0x0F, 0x17, 0x1F, 0x2F, 0x3F };
+	static const uint8_t density_map[] = { 0x1F, 0x00, 0x10, 0x1F, 0x2F, 0x3F };
 	uint8_t density = density_map[density_level];
+
+	/* When toner save is on, captures show byte[36] changes to 0x02 */
+	if (save) pt2 = 0x02;
 
 	/* Get paper size code based on page dimensions */
 	uint8_t paper_code = get_paper_size_code(dims->paper_width, dims->paper_height);
 	fprintf(stderr, "DEBUG: CAPT: Paper size code 0x%02X for %ux%u pixels\n",
 		paper_code, dims->paper_width, dims->paper_height);
 
+	/* Page counter: increments per page within job (0-based) */
+	uint8_t page_counter = (state->ipage > 0) ? (uint8_t)(state->ipage - 1) : 0;
+
+	/* Page parameters (40 bytes) - matched byte-for-byte to USB captures:
+	 * [0-1]   page counter (LE16, 0-based per page in job)
+	 * [2-3]   magic 0x312A
+	 * [4-5]   paper size code (LE16)
+	 * [6-7]   reserved (0x0000)
+	 * [8]     toner density (0x00=Lightest, 0x1F=Normal, 0x3F=Darkest)
+	 * [9-11]  always 0x1F 0x1F 0x1F
+	 * [12]    paper type (0x00=Plain, 0x01=PlainL, 0x05=Envelope)
+	 * [13-18] fixed: 0x11 0x04 0x00 0x01 0x01 0x02
+	 * [19]    toner save (0x00=OFF, 0x01=ON)
+	 * [20-25] fixed: 0x01 0x00 0x78 0x00 0x60 0x00
+	 * [26-27] line size in bytes (LE16)
+	 * [28-29] num lines (LE16)
+	 * [30-31] paper width pixels (LE16)
+	 * [32-33] paper height pixels (LE16)
+	 * [34-35] reserved (0x0000)
+	 * [36]    page type extra (0x01=normal, 0x02=tonerSave)
+	 * [37-39] reserved (0x000000)
+	 */
 	uint8_t pageparms[] = {
-		0x00, 0x00, 0x30, 0x2A, /* sz */ paper_code, 0x00, 0x00, 0x00,
-		density, 0x1C, 0x1C, 0x1C, paper_type, /* adapt */ 0x11, 0x04, 0x00,
-		0x01, 0x01, /* img ref */ 0x00, save, 0x00, 0x00,
-		/* height margin 118 */ 0x76, 0x00,
-		/*  width margin 78 */  0x4e, 0x00,
+		page_counter, 0x00, 0x31, 0x2A, paper_code, 0x00, 0x00, 0x00,
+		density, 0x1F, 0x1F, 0x1F, paper_type, 0x11, 0x04, 0x00,
+		0x01, 0x01, 0x02, save, 0x01, 0x00, 0x78, 0x00,
+		0x60, 0x00,
 		LO(dims->line_size), HI(dims->line_size), LO(dims->num_lines), HI(dims->num_lines),
 		LO(dims->paper_width), HI(dims->paper_width),
 		LO(dims->paper_height), HI(dims->paper_height),
-		/* 34 bytes */
 		0x00, 0x00, pt2, 0x00, 0x00, 0x00,
-		/* 72 bytes */
-/*
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-*/
 	};
 
 	(void) state;
@@ -335,48 +360,34 @@ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct pa
 
 	capt_send(CAPT_PRINT_DATA_END, NULL, 0);
 
-	/* Wait until the page data is received by the printer */
+	/* Wait until the page is received by printer before firing.
+	 * USB captures show: PRINT_DATA_END → poll status → FIRE
+	 * (no JOB_SETUP between DATA_END and FIRE) */
 	while (1) {
-		sleep(1);
-		status = lbp2900_get_status(state->ops);
-		if (status->page_received == status->page_decoding)
-			break;
+	  sleep(1);
+	  status = lbp2900_get_status(state->ops);
+	  if (status->page_received == status->page_decoding)
+	    break;
 	}
-
-	/*
-	 * Per Windows USB capture analysis:
-	 * - fg=2 (JOB_SETUP) is NEVER sent by Windows — it may trigger
-	 *   a spurious paper pre-fetch, causing jams. Removed.
-	 * - fg=6 is sent ONLY ONCE at job end (in job_epilogue).
-	 * - The page_out wait is essential to let the printer physically
-	 *   eject each page before the next page_prologue sends SET_PARMS,
-	 *   which itself can trigger a paper pull.
-	 */
 
 	uint8_t buf[2] = { LO(status->page_decoding), HI(status->page_decoding) };
 	capt_sendrecv(CAPT_FIRE, buf, 2, NULL, 0);
+	lbp2900_wait_ready(state->ops);
 
-	/* Track last fired page for fg=6 in job_epilogue */
+	/* Track the last fired page for job-end JOB_SETUP */
 	state->last_fired_page = status->page_decoding;
 
-	fprintf(stderr, "DEBUG: CAPT: fired page %u\n", status->page_decoding);
-
-	/*
-	 * Wait for physical page ejection before allowing next page.
-	 *
-	 * IMPORTANT: Do NOT check NOPAPER flags here. When the last sheet
-	 * is pulled from the paper tray, NOPAPER1/NOPAPER2 go true transiently
-	 * while the page is still physically moving through the fuser. The old
-	 * code returned false on NOPAPER, which caused rastertocapt to retry
-	 * the already-fired page, jamming the printer.
-	 *
-	 * If a real jam occurs, page_out will never advance and the job_epilogue
-	 * wait (page_completed) will eventually be cancelled by CUPS timeout.
-	 */
 	while (1) {
 		const struct capt_status_s *status = lbp2900_get_status(state->ops);
+		/* Interesting. Using page_printing here results in shifted print */
 		if (status->page_out == status->page_decoding)
 			return true;
+		if (FLAG(status, CAPT_FL_NOPAPER2) || FLAG(status, CAPT_FL_NOPAPER1)) {
+			fprintf(stderr, "DEBUG: CAPT: no paper\n");
+			if (FLAG(status, CAPT_FL_PRINTING) || FLAG(status, CAPT_FL_PROCESSING1))
+				continue;
+			return false;
+		}
 		sleep(1);
 	}
 }
@@ -385,22 +396,19 @@ static void lbp2900_job_epilogue(struct printer_state_s *state)
 {
 	uint8_t jbuf[2] = { LO(job), HI(job) };
 
-	/*
-	 * Per Windows driver USB capture (frame 551→555→559):
-	 * After the last FIRE, fg=6 is sent IMMEDIATELY, then JOB_END.
-	 * The Windows driver does NOT wait for page_completed before fg=6.
-	 * Sequence: FIRE(last) → JOB_SETUP(fg=6) → JOB_END
-	 * Then it polls CHKXSTATUS/CHKJOBSTAT after JOB_END.
-	 */
-	send_job_start(state, 6, state->last_fired_page);
-
-	/* Now wait for all pages to complete before closing the job */
+	/* Wait for all pages to finish printing */
 	while (1) {
 		const struct capt_status_s *status = lbp2900_get_status(state->ops);
 		if (status->page_completed == status->page_decoding)
 			break;
 		sleep(1);
 	}
+
+	/* Send final JOB_SETUP with fg=6 (end marker) before JOB_END.
+	 * USB captures show this appears once at the end of the job,
+	 * after all pages have been fired and completed. */
+	send_job_start(state, 6, state->last_fired_page);
+	lbp2900_wait_ready(state->ops);
 
 	capt_sendrecv(CAPT_JOB_END, jbuf, 2, NULL, 0);
 }
@@ -409,21 +417,65 @@ static void lbp2900_page_setup(struct printer_state_s *state,
 		struct page_dims_s *dims,
 		unsigned width, unsigned height)
 {
-/*
-	A4		4736x6778 or 4736x4520
-	Letter		4864x6368
-	Legal		4864x8192
-	Executive	4128x6080
-	3x5		1344x2528
-*/
+	/*
+	 * Raster dimensions per SPECS file + USB capture verification:
+	 *   A4         4736 x 6776  (line_size=592)  [capture confirmed]
+	 *   Letter     4864 x 6368  (line_size=608)  [SPECS]
+	 *   Legal      4864 x 8162  (line_size=608)  [capture confirmed]
+	 *   Executive  4128 x 6080  (line_size=516)
+	 *   A5         3392 x 4736  (line_size=424)
+	 *   B5         4096 x 5824  (line_size=512)
+	 *   Index 3x5  1344 x 2528  (line_size=168)
+	 *
+	 * Paper width determines line_size:
+	 *   width <= 4960 (A4/smaller) → 4736 pixels → 592 bytes
+	 *   width > 4960 (Letter/Legal) → 4864 pixels → 608 bytes
+	 *
+	 * Max num_lines = paper_height - 238 pixel margin (10mm)
+	 */
+	unsigned max_raster_width;
+	unsigned max_lines;
+
 	(void) state;
-	(void) width;
 	dims->band_size = 70;
-	dims->line_size = 4736 / 8;
-	if (height > 6778)
-		dims->num_lines = 6778;
+
+	/* Select raster width based on paper width */
+	if (dims->paper_width > 4960) {
+		/* Letter, Legal, and wider sizes */
+		max_raster_width = 4864;
+	} else if (dims->paper_width > 4350) {
+		/* A4 and B5 range */
+		max_raster_width = 4736;
+	} else if (dims->paper_width > 3600) {
+		/* Executive range */
+		max_raster_width = 4128;
+	} else if (dims->paper_width > 2600) {
+		/* A5 range */
+		max_raster_width = 3392;
+	} else if (dims->paper_width > 1900) {
+		/* Envelope range */
+		max_raster_width = 2400;
+	} else {
+		/* Index card range */
+		max_raster_width = 1344;
+	}
+
+	dims->line_size = max_raster_width / 8;
+
+	/* Max lines = paper height pixels minus ~238 pixel margin */
+	if (dims->paper_height > 238)
+		max_lines = dims->paper_height - 238;
+	else
+		max_lines = dims->paper_height;
+
+	if (height > max_lines)
+		dims->num_lines = max_lines;
 	else
 		dims->num_lines = height;
+
+	/* Ensure width doesn't exceed raster width */
+	if (width > max_raster_width)
+		width = max_raster_width;
 }
 
 static void lbp2900_wait_user(struct printer_state_s *state)

@@ -155,6 +155,9 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 	free(buf);
 }
 
+/* JOB_BEGIN magic buffer is now built dynamically in lbp2900_job_prologue
+ * to support retry (first byte = previous job_id for fg=2 retry).
+ * Default pattern: 00 00 1E 00 00 00 00 00 */
 static const uint8_t magicbuf_0[] = {
 	0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00
 };
@@ -172,8 +175,9 @@ static const uint8_t blinkonbuf[] = {
 };
 
 static const uint8_t jambuf[] = {
-	/* Paper jam LED pattern (different from no-paper)
-	 * From USB capture: 00 00 06 00 00 00 00 00 00 00 00 01 */
+	/* Paper jam LED pattern (byte[2]=0x06, byte[11]=0x01).
+	 * From USB capture: 00 00 06 00 00 00 00 00 00 00 00 01
+	 * Different from no-paper which has: byte[2-4]=01 02 01, byte[10]=01 */
 	0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 };
@@ -196,18 +200,31 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 	capt_init_status();
 	lbp2900_get_status(state->ops);
 
-	capt_sendrecv(CAPT_START_0, NULL, 0, NULL, 0);
-	capt_sendrecv(CAPT_JOB_BEGIN, magicbuf_0, ARRAY_SIZE(magicbuf_0), buf, &size);
-	job=WORD(buf[2], buf[3]);
+	/* JOB_BEGIN first byte carries previous job_id for retry (fg=2),
+	 * or 0 for new job. USB captures show:
+	 *   New job:   00 00 1E 00 00 00 00 00
+	 *   Retry:     05 00 1E 00 00 00 00 00  (05 = previous job_id) */
+	uint8_t magicbuf[8] = { 0x00, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00 };
+	if (state->is_retry)
+		magicbuf[0] = LO(job);
 
-	capt_sendrecv(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf), NULL, 0);
-	lbp2900_wait_ready(state->ops);
+	capt_sendrecv(CAPT_START_0, NULL, 0, NULL, 0);
+	capt_sendrecv(CAPT_JOB_BEGIN, magicbuf, ARRAY_SIZE(magicbuf), buf, &size);
+	job=WORD(buf[2], buf[3]);
 
 	/* Use fg=2 for retry after error recovery, fg=1 for new job.
 	 * USB captures show: initial job uses fg=1, retry after
 	 * out-of-paper/jam recovery uses fg=2 in JOB_SETUP. */
 	uint8_t fg = state->is_retry ? 2 : 1;
 	send_job_start(state, fg, 0);
+	lbp2900_wait_ready(state->ops);
+
+	/* Send RESET(0x0000) after JOB_SETUP — seen in USB captures
+	 * for most normal prints between JOB_SETUP and START_1 init */
+	uint8_t dummy[2] = {0x00, 0x00};
+	capt_sendrecv(CAPT_RESET, dummy, sizeof(dummy), NULL, 0);
+
+	capt_sendrecv(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf), NULL, 0);
 	lbp2900_wait_ready(state->ops);
 
 	/* Clear retry flag after job setup */
@@ -505,9 +522,9 @@ static void lbp2900_wait_user(struct printer_state_s *state)
 
 	/* Determine error type and use appropriate GPIO LED pattern.
 	 * From USB capture analysis:
-	 *   Paper jam:  GPIO 00 00 06 00 00 00 00 00 00 00 01 00
+	 *   Paper jam:  GPIO 00 00 06 00 00 00 00 00 00 00 00 01
 	 *   No paper:   GPIO 00 00 01 02 01 00 00 00 00 00 01 00
-	 * Both are followed by CMD_E0A6(0x0000) during error wait */
+	 * Both are followed by CAPT_RESET(0x0000) during error wait */
 	status = lbp2900_get_status(state->ops);
 	if (FLAG(status, CAPT_FL_PAPERJAM) || FLAG(status, CAPT_FL_JAMERR)) {
 		fprintf(stderr, "DEBUG: CAPT: signaling paper jam via GPIO\n");
@@ -519,8 +536,7 @@ static void lbp2900_wait_user(struct printer_state_s *state)
 	lbp2900_wait_ready(state->ops);
 
 	/* Send CAPT_RESET(0x0000) - seen in USB captures during both
-	 * paper jam and no-paper error recovery sequences, as well as
-	 * normal print initialization */
+	 * paper jam and no-paper error recovery sequences */
 	uint8_t dummy[2] = {0x00, 0x00};
 	capt_sendrecv(CAPT_RESET, dummy, sizeof(dummy), NULL, 0);
 
@@ -549,6 +565,15 @@ static void lbp2900_wait_user(struct printer_state_s *state)
 
 	/* Turn off LED */
 	capt_sendrecv(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf), NULL, 0);
+	lbp2900_wait_ready(state->ops);
+
+	/* Re-initialize printer after error recovery.
+	 * USB captures show full re-init after GPIO_off:
+	 *   START_1 → START_2 → START_3 → UPLOAD_2(DEADBEEF) */
+	capt_sendrecv(CAPT_START_1, NULL, 0, NULL, 0);
+	capt_sendrecv(CAPT_START_2, NULL, 0, NULL, 0);
+	capt_sendrecv(CAPT_START_3, NULL, 0, NULL, 0);
+	capt_sendrecv(CAPT_UPLOAD_2, magicbuf_2, ARRAY_SIZE(magicbuf_2), NULL, 0);
 	lbp2900_wait_ready(state->ops);
 }
 

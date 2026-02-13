@@ -2,6 +2,7 @@
 
 > Comprehensive reverse-engineering analysis of USB captures from Canon LBP2900B printer.
 > 18 pcapng files analyzed using tshark + custom Python parser.
+> Updated with implementation verification and corrected findings.
 
 ---
 
@@ -20,6 +21,8 @@
 11. [Status/Response Codes](#11-statusresponse-codes)
 12. [Unknown Commands](#12-unknown-commands)
 13. [Error/Recovery Scenarios](#13-errorrecovery-scenarios)
+14. [JOB_BEGIN Retry Format](#14-job_begin-retry-format)
+15. [Implementation Status](#15-implementation-status)
 
 ---
 
@@ -261,15 +264,15 @@ JOB_SETUP (`a1e1`) HOST→DEV carries print job metadata with embedded UTF-16LE 
 Offset  Size  Field                     Notes
 ------  ----  -----------------------   --------------------------------
  0-3    4     (unknown)                 Always 00 00 00 00
- 4      1     Phase flag?               0x01=has data, 0x00=cancel/cleanup
+ 4      1     Phase flag                0x01=has data (normal), 0x00=cancel, or page count for multi-page
  5-7    3     (padding)                 Always 00 00 00
  8-9    2     Hostname length (LE16)    In bytes (e.g. 20 = 10 UTF-16 chars)
 10-11   2     Username length (LE16)    In bytes (e.g. 12 = 6 UTF-16 chars)
 12-13   2     Docname length (LE16)     In bytes (e.g. 14 = 7 UTF-16 chars)
 14-15   2     (padding)                 Always 00 00
-16      1     Job phase                 0x01=start, 0x02=extra?, 0x04=cancel, 0x06=end
-17      1     Unknown                   0x01=normal, 0x02=cancel/end
-18-19   2     Param (LE16)              Values: 1-5 (varies per capture, possibly job_id related)
+16      1     Job phase (fg)            0x01=start, 0x02=retry after error, 0x04=cancel, 0x06=end
+17      1     Source type               0x01=standard print, 0x02=Chrome/app-initiated print
+18-19   2     Job ID (LE16)             Assigned by printer in JOB_BEGIN response, reused in JOB_END
 20-21   2     X resolution? (LE16)      Always 480 (0x01E0)
 22-23   2     Y resolution? (LE16)      Always 420 (0x01A4)
 24-25   2     Year (LE16)               e.g. 2025 (0x07E9)
@@ -319,7 +322,7 @@ Both contain identical hostname/username/docname.
 - **Scenario**: Attempted print when printer disconnected, then paused/deleted
 - **JOB_SETUP (×4)**: Host=OPREKIN-PC, User=mrhell, Doc=ChatGPT
   - Fr63: byte16=0x01 (start), Fr159: byte16=0x06 (end)
-  - Fr641: byte16=0x02 (retry?), Fr1661: (another attempt)
+  - Fr641: byte16=0x02 (retry after error), Fr1661: byte16=0x04 (cancel)
 - **Page Params**: Letter, toner=Normal, type=Plain, save=OFF, 4960×7014px
 - **Notable**: Multiple JOB_BEGIN/JOB_END cycles, a6e0 command appears
 - **GPIO**: `00 00 01 02 01 00 00 00 00 00 01 00` (non-zero — error state)
@@ -344,11 +347,13 @@ Both contain identical hostname/username/docname.
 - **GPIO (first)**: `00 00 01 02 01 00 00 00 00 00 01 00` (error state GPIO)
 - **GPIO (second)**: `00 00 00 00 00 00 00 00 00 00 00 00` (normal after recovery)
 - **Error recovery**:
-  - Extended CHKJOBSTAT_ALT polling (hundreds of frames with `1088` response)
-  - `8000` status blocks appear during out-of-paper (payload: `f60968109600000100000000`)
-  - After paper fed + button pressed: new GPIO → re-init (E0A3,E0A2,E0A4,E0A5) → `c000` status blocks
-  - Resume: SET_PARMS → PRINT_DATA → FIRE → JOB_END
-- **a6e0**: Appears once after initial error recovery
+  - First attempt: JOB_SETUP(fg=1, job_id=5) → FIRE → JOB_SETUP(fg=6) → JOB_END(5)
+  - Retry: JOB_BEGIN(byte[0]=0x05, prev job_id) → JOB_SETUP(fg=2, job_id=5)
+  - Re-init: START_1 → START_2 → START_3 → UPLOAD_2(DEADBEEF)
+  - GPIO(no-paper) → RESET(0000) → wait → GPIO(off)
+  - Second re-init: START_1 → START_2 → START_3 → UPLOAD_2
+  - Resume: SET_PARMS → PRINT_DATA → FIRE → JOB_SETUP(fg=6) → JOB_END(5)
+- **a6e0 (RESET)**: Appears during error recovery after GPIO
 
 ### 7.7 `print3continuousPages.pcapng`
 - **Scenario**: Print 3 consecutive pages in one job
@@ -384,7 +389,7 @@ Both contain identical hostname/username/docname.
 ### 7.13 `PageSizeToIndexCard-OutputSizeToA4-...-PageTypeToHeavy-TonerDensityToNormalButUseTonerSave.pcapng`
 - **Scenario**: IndexCard→A4, 2 pages/sheet, Heavy paper, Toner Save ON
 - **JOB_SETUP**: Host=OPREKIN-PC, User=mrhell, Doc=**Chrome Web Store**
-  - byte4=0x00, byte16=0x01, byte17=0x02 (different from normal)
+  - byte4=0x00, byte16=0x01, byte17=0x02 (Chrome-initiated print)
 - **Page Params (×3 SET_PARMS)**: Letter, toner=Normal, type=**Plain_L(0x01)**, save=**ON**
   - byte[36]=0x02 (instead of normal 0x01)
   - 2 FIRE commands (pages 1, 2)
@@ -468,10 +473,11 @@ Both contain identical hostname/username/docname.
 | CancelDoc | OPREKIN-PC | mrhell | Chrome Web Store | 2025-11-27 22:55:58 | **0x04** | **0x02** | 2 |
 
 ### Key Observations:
-- **byte16** transitions: `0x01`(start) → `0x06`(end) for normal jobs, `0x04` for cancellations
-- **byte17**: `0x01` for standard prints, `0x02` for Chrome-originated prints
-- **byte18-19**: Appears to be a job/session counter (values 1-5)
-- **bytes 20-23**: Always 480×420 — possibly resolution in some unit (480×420 ÷ 25.4 ≈ ~19dpi? Or display PPI?)
+- **byte16 (fg)** transitions: `0x01`(start) → `0x06`(end) for normal jobs, `0x02` for retry after error recovery, `0x04` for cancellation. **There is no fg=5** — earlier confusion stemmed from JOB_END payload=5 (which is the job_id, not fg)
+- **byte17**: `0x01` for standard prints, `0x02` for Chrome/app-originated prints
+- **byte18-19 (job_id)**: Monotonically increasing job counter assigned by the printer. Values 1-8 seen across captures. JOB_END payload always matches this job_id. JOB_BEGIN response returns this value.
+- **bytes 20-23**: Always 480×420 — possibly resolution in some unit
+- **byte4 (phase_flag)**: Usually 0x01 for has-data, 0x00 for cancel. For multi-page jobs, this is the total page count (e.g., 0x03 for 3-page job)
 
 ---
 
@@ -489,9 +495,21 @@ GPIO command carries 12 bytes of payload:
 | ChromePrint (second, recovery) | `00 00 00 00 00 00 00 00 00 00 00 00` | Cleared |
 
 ### GPIO Byte Positions:
-- **Bytes 2-4**: Error/status flags (non-zero during errors)
-- **Byte 10**: Error indicator (0x01 during paper-related errors)
-- **Byte 11**: Alternate error indicator (0x01 during paper jam)
+- **Byte 2**: Error type code (0x01=no-paper/waiting, 0x06=paper jam)
+- **Byte 3**: Sub-type (0x02 during no-paper/waiting, 0x00 during jam)
+- **Byte 4**: Variant (0x01=no-paper normal, 0x02=IndexCard/special mode, 0x00=jam)
+- **Bytes 5-9**: Always 0x00
+- **Byte 10**: Set to 0x01 during no-paper errors (not during jam)
+- **Byte 11**: Set to 0x01 during paper jam (not during no-paper)
+
+### GPIO Pattern Summary:
+| Pattern | Byte[2] | Byte[3] | Byte[4] | Byte[10] | Byte[11] | Meaning |
+|---------|---------|---------|---------|----------|----------|----------|
+| `000001020100000000000100` | 0x01 | 0x02 | 0x01 | 0x01 | 0x00 | No paper / waiting |
+| `000001020200000000000100` | 0x01 | 0x02 | 0x02 | 0x01 | 0x00 | Special mode (IndexCard) |
+| `000006000000000000000001` | 0x06 | 0x00 | 0x00 | 0x00 | 0x01 | Paper jam |
+| `000001020100000000000101` | 0x01 | 0x02 | 0x01 | 0x01 | 0x01 | Cancel during error |
+| `000000000000000000000000` | 0x00 | 0x00 | 0x00 | 0x00 | 0x00 | Normal / LED off |
 
 ---
 
@@ -578,7 +596,7 @@ Byte layout: 00 00 XX XX XX XX XX XX XX XX XX
 
 | Wire | User Notation | Where Seen | Size | Payload | Purpose Guess |
 |------|--------------|------------|------|---------|---------------|
-| `a6e0` | 0xE0A6 | 5 captures (normal prints) | 6→6 | `0000`→`0000` | Post-print cleanup/reset? Always HOST→DEV then DEV→HOST with same `0000` payload |
+| `a6e0` | 0xE0A6 | Most captures (normal + error) | 6→6 | `0000`→`0000` | **RESET** — sent after JOB_SETUP in normal init, and during error recovery before re-init. Now identified as `CAPT_RESET` in driver. |
 | `a7a0` | 0xA0A7 | Manual scaling only | 4→140 | (none)→`0001...` | Extended capabilities query? Large 136-byte reply |
 | `6d00` | 0x006D | Manual scaling only | — / 32 | DEV→HOST `4c00...` | Extended status? 28-byte payload |
 | `8000` | 0x0080 | outOfPaper + IndexCard | 3072/512 | Similar to d000 | Status block during paper errors |
@@ -597,20 +615,26 @@ Always sends `eedbeaad 00000000 00000000 00000000`:
 ### Out of Paper → Feed → Resume
 
 ```
-1. Normal job start (IDENT → JOB_BEGIN → JOB_SETUP → init)
+1. Normal job start (IDENT → JOB_BEGIN → JOB_SETUP(fg=1) → RESET → init)
 2. CHKJOBSTAT_ALT polling returns 0x1088 (waiting)
 3. d000 status blocks have normal payload
 4. After paper out detected:
    - 8000 status blocks appear (payload: ...00010000...)
    - 0000 continuation shows error flags
 5. Long CHKJOBSTAT_ALT polling (hundreds of frames)
-6. After paper fed + button pressed:
-   - GPIO sent with error flags
-   - Re-initialization: E0A3, E0A2, E0A4
-   - E0A5 with DEADBEEF magic
-   - c000 status blocks appear
-7. SET_PARMS → PRINT_DATA → FIRE → JOB_END (resume normal)
+6. JOB_SETUP(fg=6) + JOB_END (end current job)
+7. JOB_BEGIN with byte[0]=prev_job_id → JOB_SETUP(fg=2) (retry)
+8. Re-initialization: START_1 → START_2 → START_3 → UPLOAD_2(DEADBEEF)
+9. GPIO(no-paper pattern: 000001020100000000000100)
+10. RESET(0000)
+11. Wait for user to feed paper + press button
+12. GPIO(off: 000000000000000000000000)
+13. Re-initialization again: START_1 → START_2 → START_3 → UPLOAD_2
+14. SET_PARMS → PRINT_DATA → FIRE → JOB_SETUP(fg=6) → JOB_END (success)
 ```
+
+**Driver implementation**: `wait_user()` handles steps 9-13, `job_epilogue()` handles step 6,
+`job_prologue()` with `is_retry=true` handles steps 7-8.
 
 ### Paper Jam → Fix → Resume (Chrome Print)
 
@@ -618,22 +642,30 @@ Always sends `eedbeaad 00000000 00000000 00000000`:
 1. Normal job start through SET_PARMS + PRINT_DATA + FIRE
 2. CHKXSTATUS returns varying status (0x0488, 0x0489...)
 3. c000 status blocks replace d000 (hundreds of occurrences)
-4. After jam cleared:
-   - New GPIO initialization
-   - Resume init sequence (E0A3, E0A2, E0A4, E0A5)
-   - d000 blocks resume
-5. JOB_SETUP(end) → JOB_END
+4. Status flags: PAPERJAM (s2 bit14) + JAMERR (s4 bit7) set
+5. GPIO(jam pattern: 000006000000000000000001)
+6. RESET(0000)
+7. Wait for jam cleared → COVEROPEN (s2 bit12) transitional → all clear
+8. GPIO(off: 000000000000000000000000)
+9. Re-init: START_1 → START_2 → START_3 → UPLOAD_2(DEADBEEF)
+10. JOB_SETUP(fg=6) → JOB_END
 ```
+
+**Driver implementation**: `page_epilogue()` detects PAPERJAM/JAMERR → returns false →
+`wait_user()` sends jam GPIO + RESET + waits + GPIO off + re-init.
 
 ### Cancel Document
 
 ```
 1. Already in active CHKJOBSTAT_ALT polling (ongoing job)
-2. Host sends JOB_SETUP with byte16=0x04 (cancel flag)
-3. Host sends INIT_E0A2
-4. Host sends JOB_END with payload 0x0200
+2. Host sends JOB_SETUP with byte16=0x04 (cancel flag), byte4=0x00 (no data)
+3. Host sends START_2 (INIT_E0A2)
+4. Host sends JOB_END with payload = job_id
 5. Post-cancel: CHKXSTATUS shows 0x1388, c000 status blocks
 ```
+
+**Driver implementation**: `cancel_job()` sends JOB_SETUP(fg=4) → START_2 → JOB_END(job_id).
+Triggered by SIGTERM/SIGINT signal handler.
 
 ### Communication Error
 
@@ -645,6 +677,8 @@ Always sends `eedbeaad 00000000 00000000 00000000`:
 5. Enters CHKXSTATUS + CHKJOBSTAT polling loop
 6. No print job initiated
 ```
+
+**Driver implementation**: Not implemented. Low priority — rare scenario.
 
 ---
 
@@ -715,3 +749,123 @@ eedbeaad 00000000 00000000 00000000
 
 *Analysis generated from 18 USB pcapng captures using tshark v4.6.3 and custom Python CAPT parser.*
 *All captures from host OPREKIN-PC, user mrhell, dated 2025-11-27.*
+*Updated 2026-02-13 with implementation verification and corrected findings.*
+
+---
+
+## 14. JOB_BEGIN Retry Format
+
+The JOB_BEGIN command (`a0a2`) payload differs between new jobs and retry-after-error:
+
+```
+New job:   00 00 1E 00 00 00 00 00   (byte[0] = 0x00)
+Retry:     05 00 1E 00 00 00 00 00   (byte[0] = previous job_id)
+```
+
+### Observed JOB_BEGIN Payloads
+
+| Capture | Payload | Context |
+|---------|---------|---------|
+| All normal prints | `00 00 1E 00 00 00 00 00` | New job |
+| outOfPaper (2nd) | `05 00 1E 00 00 00 00 00` | Retry, prev job_id=5 |
+| no_printer (2nd) | `01 00 1E 00 00 00 00 00` | Retry, prev job_id=1 |
+
+### JOB_BEGIN Response
+
+The printer responds with 4 bytes. The response contains the assigned job_id at bytes[2-3]:
+```
+Response: 00 00 XX XX   (XX XX = job_id LE16)
+```
+Our driver reads this via `job = WORD(buf[2], buf[3])`.
+
+### JOB_END Payload = Job ID
+
+The JOB_END payload always matches the JOB_SETUP byte[18-19] job_id:
+
+| Capture | job_id | JOB_END payload |
+|---------|--------|-----------------|
+| First capture | 2 | `02 00` |
+| outOfPaper | 5 | `05 00` |
+| 3 pages | 7 | `07 00` |
+| no toner | 8 | `08 00` |
+| cancel | 2 | `02 00` |
+
+**Note**: There is no fg=5. The value "5" in earlier analysis was the JOB_END payload (= job_id), not a JOB_SETUP fg value.
+
+---
+
+## 15. Implementation Status
+
+Cross-reference of protocol features vs driver implementation in `src/prn_lbp2900.c`.
+
+### ✅ Fully Implemented
+
+| Feature | Files | Notes |
+|---------|-------|-------|
+| Wire format (LE command framing) | `capt-command.c` | 4-byte header + payload |
+| Full command enum | `capt-command.h` | All observed commands including CAPT_RESET |
+| JOB_SETUP with UTF-16LE strings | `prn_lbp2900.c` | Hostname, username, docname from CUPS args |
+| JOB_SETUP fg values (1,2,4,6) | `prn_lbp2900.c` | fg=1 start, fg=2 retry, fg=4 cancel, fg=6 end |
+| SET_PARM_PAGE (40 bytes) | `prn_lbp2900.c` | Paper code, density, type, toner save, dimensions |
+| Paper size codes | `prn_lbp2900.c` | A4, Letter, Legal, A5, B5, Executive, envelopes, Index |
+| Toner density (0x00-0x3F) | `prn_lbp2900.c` | 5 levels mapped to capture values |
+| Toner save mode | `prn_lbp2900.c` | byte[19]=0x01, byte[36]=0x02 |
+| Paper type codes | `rastertocapt.c` | Plain, PlainL, Heavy, HeavyH, OHP, Envelope |
+| Multi-page printing | `prn_lbp2900.c` | Page counter in SET_PARMS, FIRE per page |
+| GPIO LED: no-paper blink | `prn_lbp2900.c` | `blinkonbuf` = `000001020100000000000100` |
+| GPIO LED: paper jam | `prn_lbp2900.c` | `jambuf` = `000006000000000000000001` |
+| GPIO LED: off | `prn_lbp2900.c` | `blinkoffbuf` = all zeros |
+| Error detection: PAPERJAM | `capt-status.h` | s2 bit 14 (0x4000) |
+| Error detection: COVEROPEN | `capt-status.h` | s2 bit 12 (0x1000) |
+| Error detection: JAMERR | `capt-status.h` | s4 bit 7 (0x0080) |
+| Error recovery wait loop | `prn_lbp2900.c` | Waits for all error flags to clear |
+| CAPT_RESET during recovery | `prn_lbp2900.c` | Sent in wait_user and job_prologue |
+| Re-init after recovery | `prn_lbp2900.c` | START_1→START_2→START_3→UPLOAD_2 in wait_user |
+| Cancel job (fg=4) | `prn_lbp2900.c` | JOB_SETUP(fg=4) → START_2 → JOB_END |
+| Job retry with fg=2 | `prn_lbp2900.c` | is_retry flag, JOB_BEGIN carries prev job_id |
+| JOB_BEGIN retry format | `prn_lbp2900.c` | byte[0] = previous job_id for retry |
+| INIT_E0A5 DEADBEEF magic | `prn_lbp2900.c` | `magicbuf_2` = `eedbeaad...` |
+| HISCOA compression params | `hiscoa-common.c` | Fixed `01 04 01 01 00 f9 80 00` |
+| Signal-based cancel (SIGTERM) | `rastertocapt.c` | Graceful CUPS cancel handling |
+
+### ⚠️ Partial / Approximated
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| phase_flag (byte[4]) | Simplified | Code uses 0/1 (has_data), captures show page count for multi-page. Non-critical — printer accepts both. |
+| byte17 (source type) | Hardcoded 0x01 | Chrome prints use 0x02. No functional difference observed. |
+| Page counter in SET_PARMS byte[0] | Uses ipage | Captures show 0-based; code uses `ipage-1`. Matches. |
+| GPIO IndexCard variant | Not needed | `000001020200000000000100` (byte[4]=2) only seen in special mode. Standard blink works. |
+
+### ❌ Not Implemented (Low Priority)
+
+| Feature | Reason |
+|---------|--------|
+| 0xA0A7 extended capabilities query | Only seen in manual-scaling capture. Unknown purpose. |
+| 0x006D extended status response | Only seen in manual-scaling capture. Unknown purpose. |
+| Cancel GPIO pattern (byte[10]+byte[11] both set) | Only seen during cancel-while-in-error. Standard cancel via fg=4 works. |
+| d000/c000/8000 status block parsing | Large status blocks (512-3072 bytes) with error/printing info. Current polling-based approach works. |
+| Communication error (0x3188) handling | Would need IDENT retry loop. Rare scenario. |
+
+### Status Register Map (Confirmed from captures)
+
+```
+status[0] (s0):  [15]=READY1 [12]=READY2 [9]=JOBSTAT_CHNG [8]=XSTATUS_CHNG
+                 [7]=BUSY [5]=UNINIT1 [4]=UNINIT2 [2]=BUFFERFULL
+                 [1]=NOPAPER1 [0]=PROCESSING
+
+status[1] (s1):  [14]=NOPAPER2 [7]=PROCESSING1 [5]=BUTTON [2]=PRINTING
+                 [0]=POWERUP
+
+status[2] (s2):  [14]=PAPERJAM [12]=COVEROPEN [8]=BUTTON1 [7]=nERROR
+                 Jam recovery: 0x4100 → 0x1000 → 0x0000
+
+status[3] (s3):  [12]=POWERUP1
+
+status[4] (s4):  [7]=JAMERR
+                 During jam: togles with PAPERJAM, both set = active jam
+
+status[5] (s5):  (no known flags)
+
+status[6] (s6):  (no known flags)
+```

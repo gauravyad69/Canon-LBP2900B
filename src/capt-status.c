@@ -100,7 +100,10 @@ static void download_status(uint16_t cmd)
 	size_t size = sizeof(buf);
 	if (capt_sendrecv(cmd, NULL, 0, buf, &size))
 		decode_status(buf, size);
-	/* else: keep last-known-good status, polling loops will retry */
+	else
+		/* Force mismatch: page_received != page_decoding so wait loops
+		 * don't break prematurely with stale data from prior job. */
+		status.page_received = (uint16_t) -1;
 }
 
 void capt_init_status(void)

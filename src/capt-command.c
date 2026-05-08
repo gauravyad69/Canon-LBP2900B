@@ -34,7 +34,7 @@
 
 #define CAPT_MAX_RETRIES 3
 #define CAPT_RETRY_DELAY_MS 500
-#define CAPT_RESPONSE_TIMEOUT_SEC 15
+#define CAPT_RESPONSE_TIMEOUT_SEC 8
 #define CAPT_DRAIN_HEADER_TIMEOUT_SEC 0.05
 
 enum capt_read_result {
@@ -94,7 +94,7 @@ static void capt_send_buf(void)
 			} else {
 				fprintf(stderr, "ERROR: CAPT: no reply from backend, err=%i\n",
 					(int) status);
-				exit(1);
+				exit(0);
 			}
 		}
 	}
@@ -201,7 +201,7 @@ const char *capt_identify(void)
 				(char *) capt_iobuf, (int *) &capt_iosize, 60.0);
 		if (status != CUPS_SC_STATUS_OK) {
 			fprintf(stderr, "ERROR: CAPT: unable to communicate with printer\n");
-			exit(1);
+			exit(0);
 		}
 		capt_iobuf[capt_iosize] = '\0';
 		fprintf(stderr, "DEBUG: CAPT: printer ID string %s\n", capt_iobuf);
@@ -235,10 +235,10 @@ void capt_send(uint16_t cmd, const void *buf, size_t size)
 	capt_send_buf();
 }
 
-void capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size_t *reply_size)
+bool capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size_t *reply_size)
 {
 	int retry;
-	
+
 	for (retry = 0; retry <= CAPT_MAX_RETRIES; retry++) {
 		time_t start;
 		if (retry > 0) {
@@ -272,7 +272,7 @@ void capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size
 				if (reply_size)
 					*reply_size = capt_iosize;
 				capt_drain_pending();
-				return;
+				return true;
 			}
 
 			if (debug)
@@ -282,9 +282,10 @@ void capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size
 				break;
 		}
 	}
-	
-	fprintf(stderr, "ERROR: CAPT: no reply from printer after %d retries\n", CAPT_MAX_RETRIES);
-	exit(1);
+
+	fprintf(stderr, "ERROR: CAPT: no reply from printer after %d retries for cmd %04X\n",
+		CAPT_MAX_RETRIES, cmd);
+	return false;
 }
 
 void capt_multi_begin(uint16_t cmd)

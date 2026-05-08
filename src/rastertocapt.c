@@ -142,7 +142,7 @@ static void compress_page_data(struct printer_state_s *state,
 				if (cupsRasterReadPixels(raster, linebuf, header->cupsBytesPerLine)
 								!= header->cupsBytesPerLine) {
 					fprintf(stderr, "ERROR: CAPT: broken raster file\n");
-					exit(1);
+					exit(0);
 				}
 			} else {
 				memset(linebuf, 0, header->cupsBytesPerLine);

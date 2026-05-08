@@ -59,7 +59,7 @@ enum capt_command {
 const char *capt_identify(void);
 
 void capt_send(uint16_t cmd, const void *data, size_t size);
-void capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size_t *reply_size);
+bool capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size_t *reply_size);
 
 void capt_multi_begin(uint16_t cmd);
 void capt_multi_add(uint16_t cmd, const void *data, size_t size);

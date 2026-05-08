@@ -17,6 +17,8 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
+#define _DEFAULT_SOURCE  /* For usleep() */
+
 #include "capt-status.h"
 
 #include "std.h"
@@ -96,8 +98,9 @@ static void download_status(uint16_t cmd)
 {
 	uint8_t buf[0x10000];
 	size_t size = sizeof(buf);
-	capt_sendrecv(cmd, NULL, 0, buf, &size);
-	decode_status(buf, size);
+	if (capt_sendrecv(cmd, NULL, 0, buf, &size))
+		decode_status(buf, size);
+	/* else: keep last-known-good status, polling loops will retry */
 }
 
 void capt_init_status(void)
@@ -139,7 +142,7 @@ void capt_wait_ready(void)
 		const struct capt_status_s *s = capt_get_status();
 		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
 			break;
-		sleep(1);
+		usleep(100000);
 	}
 }
 
@@ -149,7 +152,7 @@ void capt_wait_xready(void)
 		const struct capt_status_s *s = capt_get_xstatus();
 		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
 			break;
-		sleep(1);
+		usleep(100000);
 	}
 }
 
@@ -159,6 +162,6 @@ void capt_wait_xready_only(void)
 		const struct capt_status_s *s = capt_get_xstatus_only();
 		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
 			break;
-		sleep(1);
+		usleep(100000);
 	}
 }

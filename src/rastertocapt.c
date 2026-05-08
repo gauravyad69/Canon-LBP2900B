@@ -48,7 +48,7 @@ static void handle_cancel_signal(int sig)
 
 /* Global print options parsed from CUPS command line */
 /* { toner_save, toner_density(1-5), paper_type, hostname, username, doc_name } */
-static struct print_options_s g_print_options = { false, 3, 0, "", "", "" };
+static struct print_options_s g_print_options = { false, 3, 0, "", "", "", 0 };
 
 
 struct cached_page_s {
@@ -381,6 +381,13 @@ int main(int argc, char *argv[])
 	if (argc < 6 || argc > 7) {
 		fprintf(stderr, "Usage: %s job-id user title copies options [file]\n", argv[0]);
 		return 1;
+	}
+
+	/* CUPS copies count is argv[4] */
+	{
+		int copies = atoi(argv[4]);
+		if (copies > 0)
+			g_print_options.total_pages = (unsigned) copies;
 	}
 
 	/* Parse print options from argv[5] */

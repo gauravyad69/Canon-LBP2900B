@@ -120,7 +120,14 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 	 * [72+]   = UTF-16LE strings: hostname, username, docname
 	 */
 	buf[0] = 0x00; buf[1] = 0x00; buf[2] = 0x00; buf[3] = 0x00;
-	buf[4] = (fg == 0x04) ? 0x00 : 0x01; /* phase flag: 1=has data, 0=cancel */
+	/* phase flag: 1=has data, 0=cancel; multi-page uses total pages */
+	if (fg == 0x04) {
+		buf[4] = 0x00;
+	} else if (state->options.total_pages > 0 && state->options.total_pages <= 255) {
+		buf[4] = (uint8_t) state->options.total_pages;
+	} else {
+		buf[4] = 0x01;
+	}
 	buf[5] = 0x00; buf[6] = 0x00; buf[7] = 0x00;
 	buf[8] = LO(ml); buf[9] = HI(ml);     /* Hostname length (UTF-16LE bytes) */
 	buf[10] = LO(ul); buf[11] = HI(ul);   /* Username length */
@@ -446,16 +453,43 @@ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct pa
 	}
 }
 
+static void lbp2900_wait_user(struct printer_state_s *state);
+
 static void lbp2900_job_epilogue(struct printer_state_s *state)
 {
 	uint8_t jbuf[2] = { LO(job), HI(job) };
 
-	/* Wait for all pages to finish printing */
-	while (1) {
-		const struct capt_status_s *status = lbp2900_get_status(state->ops);
-		if (status->page_completed == status->page_decoding)
-			break;
-		sleep(1);
+	/* Wait for all pages to finish printing.
+	 * Prefer the requested total pages when available; fall back to decoding count.
+	 */
+	if (state->options.total_pages > 0) {
+		while (1) {
+			const struct capt_status_s *status = lbp2900_get_status(state->ops);
+			if (FLAG(status, CAPT_FL_NOPAPER1) || FLAG(status, CAPT_FL_NOPAPER2)
+				|| FLAG(status, CAPT_FL_PAPERJAM) || FLAG(status, CAPT_FL_JAMERR)
+				|| FLAG(status, CAPT_FL_COVEROPEN)) {
+				fprintf(stderr, "DEBUG: CAPT: job_epilogue waiting for user action\n");
+				lbp2900_wait_user(state);
+				continue;
+			}
+			if (status->page_completed >= state->options.total_pages)
+				break;
+			sleep(1);
+		}
+	} else {
+		while (1) {
+			const struct capt_status_s *status = lbp2900_get_status(state->ops);
+			if (FLAG(status, CAPT_FL_NOPAPER1) || FLAG(status, CAPT_FL_NOPAPER2)
+				|| FLAG(status, CAPT_FL_PAPERJAM) || FLAG(status, CAPT_FL_JAMERR)
+				|| FLAG(status, CAPT_FL_COVEROPEN)) {
+				fprintf(stderr, "DEBUG: CAPT: job_epilogue waiting for user action\n");
+				lbp2900_wait_user(state);
+				continue;
+			}
+			if (status->page_completed == status->page_decoding)
+				break;
+			sleep(1);
+		}
 	}
 
 	/* Send final JOB_SETUP with fg=6 (end marker) before JOB_END.

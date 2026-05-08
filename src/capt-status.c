@@ -79,6 +79,19 @@ static void decode_status(const uint8_t *s, size_t size)
 	status.status[6] = WORD(s[38], s[39]);
 }
 
+static inline bool status_ready_word(uint16_t word)
+{
+	/* Known CHKXSTATUS/CHKSTATUS ready codes from captures. */
+	switch (word) {
+	case 0x0088: /* Normal/ready */
+	case 0x1088: /* Job active, waiting */
+	case 0x0188: /* Post-print */
+		return true;
+	default:
+		return false;
+	}
+}
+
 static void download_status(uint16_t cmd)
 {
 	uint8_t buf[0x10000];
@@ -115,25 +128,37 @@ const struct capt_status_s *capt_get_xstatus_only(void)
 const struct capt_status_s *capt_get_xstatus(void)
 {
 	download_status(CAPT_CHKSTATUS);
-	if (FLAG(&status, CAPT_FL_XSTATUS_CHNG))
-		capt_get_xstatus_only();
+	/* Always refresh extended status to keep page counters accurate. */
+	capt_get_xstatus_only();
 	return &status;
 }
 
 void capt_wait_ready(void)
 {
-	while (FLAG(capt_get_status(), CAPT_FL_BUSY))
+	while (1) {
+		const struct capt_status_s *s = capt_get_status();
+		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
+			break;
 		sleep(1);
+	}
 }
 
 void capt_wait_xready(void)
 {
-	while (FLAG(capt_get_xstatus(), CAPT_FL_BUSY))
+	while (1) {
+		const struct capt_status_s *s = capt_get_xstatus();
+		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
+			break;
 		sleep(1);
+	}
 }
 
 void capt_wait_xready_only(void)
 {
-       while (FLAG(capt_get_xstatus_only(), CAPT_FL_BUSY))
-               sleep(1);
+	while (1) {
+		const struct capt_status_s *s = capt_get_xstatus_only();
+		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
+			break;
+		sleep(1);
+	}
 }

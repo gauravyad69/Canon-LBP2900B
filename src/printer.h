@@ -37,6 +37,7 @@ struct print_options_s {
 	char hostname[64];       /* Hostname for job metadata */
 	char username[64];       /* Username for job metadata */
 	char doc_name[128];      /* Document name for job metadata */
+	unsigned total_pages;    /* Total pages from CUPS (copies) */
 };
 
 struct page_dims_s;

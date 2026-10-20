@@ -37,7 +37,7 @@ struct print_options_s {
 	char hostname[64];       /* Hostname for job metadata */
 	char username[64];       /* Username for job metadata */
 	char doc_name[128];      /* Document name for job metadata */
-	unsigned total_pages;    /* Total pages from CUPS (copies) */
+	unsigned total_pages;    /* Optional total page count, when supplied by the job */
 };
 
 struct page_dims_s;
@@ -70,6 +70,7 @@ struct printer_ops_s {
 };
 
 const struct printer_ops_s *printer_detect(void);
+bool printer_job_cancelled(void);
 
 
 void __printer_register_ops(const char *name, const struct printer_ops_s *ops,

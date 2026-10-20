@@ -24,6 +24,7 @@
 #include "std.h"
 #include "word.h"
 #include "capt-command.h"
+#include "printer.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -53,18 +54,26 @@ static void print_status(void)
 	);
 }
 
-static void decode_status(const uint8_t *s, size_t size)
+static bool decode_status(const uint8_t *s, size_t size)
 {
-	status.status[0] = WORD(s[0], s[1]);
+	if (size < 2) {
+		fprintf(stderr, "ERROR: CAPT: status reply is too short (%u bytes)\n",
+			(unsigned) size);
+		return false;
+	}
 
-	if (size <= 2)
-		return;
+	status.status[0] = WORD(s[0], s[1]);
+	status.valid = true;
+
+	if (size < 10)
+		return true;
 
 	status.status[1] = WORD(s[8], s[9]);
 
-	if (size <= 10)
-		return;
+	if (size < 36)
+		return true;
 
+	status.extended_valid = true;
 	status.status[2] = WORD(s[10], s[11]);
 	status.status[3] = WORD(s[12], s[13]);
 
@@ -78,7 +87,9 @@ static void decode_status(const uint8_t *s, size_t size)
 
 	status.status[5] = WORD(s[30], s[31]);
 
-	status.status[6] = WORD(s[38], s[39]);
+	if (size >= 40)
+		status.status[6] = WORD(s[38], s[39]);
+	return true;
 }
 
 static inline bool status_ready_word(uint16_t word)
@@ -98,9 +109,32 @@ static void download_status(uint16_t cmd)
 {
 	uint8_t buf[0x10000];
 	size_t size = sizeof(buf);
-	if (capt_sendrecv(cmd, NULL, 0, buf, &size))
-		decode_status(buf, size);
-	else
+	bool old_extended_valid = status.extended_valid;
+	uint16_t old_page_decoding = status.page_decoding;
+	uint16_t old_page_printing = status.page_printing;
+	uint16_t old_page_out = status.page_out;
+	uint16_t old_page_completed = status.page_completed;
+	uint16_t old_page_received = status.page_received;
+	status.valid = false;
+	status.extended_valid = false;
+	memset(status.status, 0, sizeof(status.status));
+	status.page_decoding = 0;
+	status.page_printing = 0;
+	status.page_out = 0;
+	status.page_completed = 0;
+	status.page_received = (uint16_t) -1;
+	if (!capt_sendrecv(cmd, NULL, 0, buf, &size)
+			|| !decode_status(buf, size))
+		status.valid = false;
+	if (old_extended_valid && !status.extended_valid) {
+		status.extended_valid = true;
+		status.page_decoding = old_page_decoding;
+		status.page_printing = old_page_printing;
+		status.page_out = old_page_out;
+		status.page_completed = old_page_completed;
+		status.page_received = old_page_received;
+	}
+	if (!status.valid)
 		/* Force mismatch: page_received != page_decoding so wait loops
 		 * don't break prematurely with stale data from prior job. */
 		status.page_received = (uint16_t) -1;
@@ -141,8 +175,12 @@ const struct capt_status_s *capt_get_xstatus(void)
 
 void capt_wait_ready(void)
 {
-	while (1) {
+	while (!printer_job_cancelled()) {
 		const struct capt_status_s *s = capt_get_status();
+		if (!s->valid) {
+			usleep(100000);
+			continue;
+		}
 		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
 			break;
 		usleep(100000);
@@ -151,8 +189,12 @@ void capt_wait_ready(void)
 
 void capt_wait_xready(void)
 {
-	while (1) {
+	while (!printer_job_cancelled()) {
 		const struct capt_status_s *s = capt_get_xstatus();
+		if (!s->valid) {
+			usleep(100000);
+			continue;
+		}
 		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
 			break;
 		usleep(100000);
@@ -161,8 +203,12 @@ void capt_wait_xready(void)
 
 void capt_wait_xready_only(void)
 {
-	while (1) {
+	while (!printer_job_cancelled()) {
 		const struct capt_status_s *s = capt_get_xstatus_only();
+		if (!s->valid) {
+			usleep(100000);
+			continue;
+		}
 		if (status_ready_word(s->status[0]) || !FLAG(s, CAPT_FL_BUSY))
 			break;
 		usleep(100000);

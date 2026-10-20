@@ -43,7 +43,11 @@ static void handle_cancel_signal(int sig)
 {
 	(void)sig;
 	g_job_cancelled = 1;
-	fprintf(stderr, "DEBUG: CAPT: Job cancellation requested\n");
+}
+
+bool printer_job_cancelled(void)
+{
+	return g_job_cancelled != 0;
 }
 
 /* Global print options parsed from CUPS command line */
@@ -142,7 +146,7 @@ static void compress_page_data(struct printer_state_s *state,
 				if (cupsRasterReadPixels(raster, linebuf, header->cupsBytesPerLine)
 								!= header->cupsBytesPerLine) {
 					fprintf(stderr, "ERROR: CAPT: broken raster file\n");
-					exit(0);
+					exit(1);
 				}
 			} else {
 				memset(linebuf, 0, header->cupsBytesPerLine);
@@ -205,6 +209,11 @@ static void do_print(int fd)
 	state->options = g_print_options; /* Copy global options to state */
 
 	raster = cupsRasterOpen(fd, CUPS_RASTER_READ);
+	if (!raster) {
+		fprintf(stderr, "ERROR: CAPT: unable to open raster input\n");
+		free(state);
+		exit(1);
+	}
 
 	fprintf(stderr, "DEBUG: CAPT: rastertocapt is rendering\n");
 
@@ -383,13 +392,6 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	/* CUPS copies count is argv[4] */
-	{
-		int copies = atoi(argv[4]);
-		if (copies > 0)
-			g_print_options.total_pages = (unsigned) copies;
-	}
-
 	/* Parse print options from argv[5] */
 	parse_options(argv[5]);
 
@@ -430,5 +432,5 @@ int main(int argc, char *argv[])
 	if (argc == 7)
 		close(fd);
 
-	return g_job_cancelled ? 0 : 0; /* Return 0 even on cancel for clean CUPS handling */
+	return 0;
 }

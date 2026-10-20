@@ -79,10 +79,16 @@ static void capt_send_buf(void)
 		if (sendsize > 4096)
 			sendsize = 4096;
 
-		fwrite(iopos, 1, sendsize, stdout);
+		if (fwrite(iopos, 1, sendsize, stdout) != sendsize) {
+			fprintf(stderr, "ERROR: CAPT: unable to write printer data\n");
+			exit(1);
+		}
 		iopos += sendsize;
 		iosize -= sendsize;
-		fflush(stdout);
+		if (fflush(stdout) != 0) {
+			fprintf(stderr, "ERROR: CAPT: unable to flush printer data\n");
+			exit(1);
+		}
 
 		status = cupsSideChannelDoRequest(CUPS_SC_CMD_DRAIN_OUTPUT,
 				(char *) tmpbuf, (int *) &tmpsize, 1.0);
@@ -94,7 +100,7 @@ static void capt_send_buf(void)
 			} else {
 				fprintf(stderr, "ERROR: CAPT: no reply from backend, err=%i\n",
 					(int) status);
-				exit(0);
+				exit(1);
 			}
 		}
 	}
@@ -201,7 +207,7 @@ const char *capt_identify(void)
 				(char *) capt_iobuf, (int *) &capt_iosize, 60.0);
 		if (status != CUPS_SC_STATUS_OK) {
 			fprintf(stderr, "ERROR: CAPT: unable to communicate with printer\n");
-			exit(0);
+			exit(1);
 		}
 		capt_iobuf[capt_iosize] = '\0';
 		fprintf(stderr, "DEBUG: CAPT: printer ID string %s\n", capt_iobuf);
@@ -265,12 +271,13 @@ bool capt_sendrecv(uint16_t cmd, const void *buf, size_t size, void *reply, size
 				}
 				if (reply) {
 					size_t copysize = reply_size ? *reply_size : capt_iosize;
-					if (copysize > capt_iosize)
-						copysize = capt_iosize;
+					size_t reply_payload_size = capt_iosize - 4;
+					if (copysize > reply_payload_size)
+						copysize = reply_payload_size;
 					memcpy(reply, capt_iobuf + 4, copysize);
 				}
 				if (reply_size)
-					*reply_size = capt_iosize;
+					*reply_size = capt_iosize - 4;
 				capt_drain_pending();
 				return true;
 			}

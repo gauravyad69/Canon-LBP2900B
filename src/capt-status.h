@@ -22,6 +22,8 @@
 #include "std.h"
 
 struct capt_status_s {
+	bool valid;
+	bool extended_valid;
 	uint16_t status[7];
 
 	uint16_t page_decoding;

@@ -76,7 +76,7 @@ static size_t ascii_to_utf16le(uint8_t *dest, const char *src, size_t max_chars)
 static bool capt_sendrecv_retry(uint16_t cmd, const void *buf, size_t size,
 		void *reply, size_t *reply_size, unsigned max_attempts);
 
-static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t page)
+static bool send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t page)
 {
 	(void) page;
 	const char *hostname = state->options.hostname;
@@ -84,9 +84,9 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 	const char *doc_name = state->options.doc_name;
 
 	/* Calculate UTF-16LE string lengths in bytes */
-	uint16_t ml = (uint16_t)(strlen(hostname) * 2);
-	uint16_t ul = (uint16_t)(strlen(username) * 2);
-	uint16_t nl = (uint16_t)(strlen(doc_name) * 2);
+	uint16_t ml = (uint16_t)(strnlen(hostname, 32) * 2);
+	uint16_t ul = (uint16_t)(strnlen(username, 32) * 2);
+	uint16_t nl = (uint16_t)(strnlen(doc_name, 64) * 2);
 
 	time_t rawtime = time(NULL);
 	const struct tm *tm = localtime(&rawtime);
@@ -98,7 +98,7 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 	uint8_t *buf = malloc(bufsize);
 	if (!buf) {
 		fprintf(stderr, "ERROR: CAPT: Failed to allocate job setup buffer\n");
-		return;
+		return false;
 	}
 	memset(buf, 0, bufsize);
 
@@ -163,8 +163,17 @@ static void send_job_start(struct printer_state_s *state, uint8_t fg, uint16_t p
 	fprintf(stderr, "DEBUG: CAPT: Job setup - Host: %s, User: %s, Doc: %s\n",
 		hostname, username, doc_name);
 
-	capt_sendrecv_retry(CAPT_JOB_SETUP, buf, bufsize, NULL, 0, 3);
+	bool ok = capt_sendrecv_retry(CAPT_JOB_SETUP, buf, bufsize, NULL, 0, 3);
 	free(buf);
+	return ok;
+}
+
+static void require_command(bool ok, uint16_t cmd)
+{
+	if (!ok) {
+		fprintf(stderr, "ERROR: CAPT: command %04X failed after retries\n", cmd);
+		exit(1);
+	}
 }
 
 /* JOB_BEGIN magic buffer is now built dynamically in lbp2900_job_prologue
@@ -225,7 +234,7 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 
 	if (!capt_sendrecv_retry(CAPT_IDENT, NULL, 0, NULL, 0, 5)) {
 		fprintf(stderr, "ERROR: CAPT: printer not responding to IDENT\n");
-		exit(0);
+		exit(1);
 	}
 	usleep(500000);
 	capt_init_status();
@@ -239,11 +248,12 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 	if (state->is_retry)
 		magicbuf[0] = LO(job);
 
-	capt_sendrecv_retry(CAPT_START_0, NULL, 0, NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_START_0, NULL, 0, NULL, 0, 3),
+		CAPT_START_0);
 	if (!capt_sendrecv_retry(CAPT_JOB_BEGIN, magicbuf, ARRAY_SIZE(magicbuf),
 			buf, &size, 3)) {
 		fprintf(stderr, "ERROR: CAPT: printer not responding to JOB_BEGIN\n");
-		exit(0);
+		exit(1);
 	}
 	job=WORD(buf[2], buf[3]);
 
@@ -251,15 +261,17 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 	 * USB captures show: initial job uses fg=1, retry after
 	 * out-of-paper/jam recovery uses fg=2 in JOB_SETUP. */
 	uint8_t fg = state->is_retry ? 2 : 1;
-	send_job_start(state, fg, 0);
+	require_command(send_job_start(state, fg, 0), CAPT_JOB_SETUP);
 	lbp2900_wait_ready(state->ops);
 
 	/* Send RESET(0x0000) after JOB_SETUP — seen in USB captures
 	 * for most normal prints between JOB_SETUP and START_1 init */
 	uint8_t dummy[2] = {0x00, 0x00};
-	capt_sendrecv_retry(CAPT_RESET, dummy, sizeof(dummy), NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_RESET, dummy, sizeof(dummy), NULL, 0, 3),
+		CAPT_RESET);
 
-	capt_sendrecv_retry(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf), NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf),
+		NULL, 0, 3), CAPT_GPIO);
 	lbp2900_wait_ready(state->ops);
 
 	/* Clear retry flag after job setup */
@@ -269,23 +281,26 @@ static void lbp2900_job_prologue(struct printer_state_s *state)
 static void lbp3000_job_prologue(struct printer_state_s *state)
 {
 	(void) state;
-	capt_sendrecv_retry(CAPT_IDENT, NULL, 0, NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_IDENT, NULL, 0, NULL, 0, 3), CAPT_IDENT);
 	sleep(1);
 	capt_init_status();
 	lbp2900_get_status(state->ops);
 
-	capt_sendrecv_retry(CAPT_START_0, NULL, 0, NULL, 0, 3);
-	capt_sendrecv_retry(CAPT_JOB_BEGIN, magicbuf_0, ARRAY_SIZE(magicbuf_0), NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_START_0, NULL, 0, NULL, 0, 3),
+		CAPT_START_0);
+	require_command(capt_sendrecv_retry(CAPT_JOB_BEGIN, magicbuf_0,
+		ARRAY_SIZE(magicbuf_0), NULL, 0, 3), CAPT_JOB_BEGIN);
 	/* LBP-3000 prints the very first printjob perfectly
 	 * and then proceeds to hang at this (commented out)
 	 * spot. That's the difference, or so it seems. */
 /*	lbp2900_wait_ready(state->ops);	*/
-	send_job_start(state, 1, 0);
+	require_command(send_job_start(state, 1, 0), CAPT_JOB_SETUP);
 	
 	/* There's also that command, that apparently does something, and does something, 
 	 * but it's there in the Wireshark logs. Response data == command data. */
 	uint8_t dummy[2] = {0, 0};
-	capt_sendrecv_retry(CAPT_RESET, dummy, sizeof(dummy), NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_RESET, dummy, sizeof(dummy), NULL, 0, 3),
+		CAPT_RESET);
 	
 	lbp2900_wait_ready(state->ops);
 }
@@ -403,26 +418,35 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 
 	status = lbp2900_get_status(state->ops);
 	if (FLAG(status, CAPT_FL_UNINIT1) || FLAG(status, CAPT_FL_UNINIT2)) {
-		capt_sendrecv_retry(CAPT_START_1, NULL, 0, NULL, 0, 3);
-		capt_sendrecv_retry(CAPT_START_2, NULL, 0, NULL, 0, 3);
-		capt_sendrecv_retry(CAPT_START_3, NULL, 0, NULL, 0, 3);
+		require_command(capt_sendrecv_retry(CAPT_START_1, NULL, 0, NULL, 0, 3),
+			CAPT_START_1);
+		require_command(capt_sendrecv_retry(CAPT_START_2, NULL, 0, NULL, 0, 3),
+			CAPT_START_2);
+		require_command(capt_sendrecv_retry(CAPT_START_3, NULL, 0, NULL, 0, 3),
+			CAPT_START_3);
 
 		/* FIXME: wait for printer is free (could it be potentially dangerous or really mandatory?) */
-		while ( ! FLAG(lbp2900_get_status(state->ops), ((4 << 16) | (1 << 0)) ) )
+		while (!printer_job_cancelled()
+			&& !FLAG(lbp2900_get_status(state->ops), ((4 << 16) | (1 << 0))))
 		  usleep(100000);
+		if (printer_job_cancelled())
+			return false;
 		lbp2900_get_status(state->ops);
 
 
 		lbp2900_wait_ready(state->ops);
-		capt_sendrecv_retry(CAPT_UPLOAD_2, magicbuf_2, ARRAY_SIZE(magicbuf_2), NULL, 0, 3);
+		require_command(capt_sendrecv_retry(CAPT_UPLOAD_2, magicbuf_2,
+			ARRAY_SIZE(magicbuf_2), NULL, 0, 3), CAPT_UPLOAD_2);
 		lbp2900_wait_ready(state->ops);
 	}
 
-	while (1) {
+	while (!printer_job_cancelled()) {
 		if (! FLAG(lbp2900_get_status(state->ops), CAPT_FL_BUFFERFULL))
 			break;
 		usleep(100000);
 	}
+	if (printer_job_cancelled())
+		return false;
 
 	capt_multi_begin(CAPT_SET_PARMS);
 	capt_multi_add(CAPT_SET_PARM_PAGE, pageparms, sizeof(pageparms));
@@ -438,29 +462,37 @@ static bool lbp2900_page_prologue(struct printer_state_s *state, const struct pa
 static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct page_dims_s *dims)
 {
 	(void) dims;
-	const struct capt_status_s *status;
+	const struct capt_status_s *status = NULL;
 
 	capt_send(CAPT_PRINT_DATA_END, NULL, 0);
 
 	/* Wait until the page is received by printer before firing.
 	 * USB captures show: PRINT_DATA_END → poll status → FIRE
 	 * (no JOB_SETUP between DATA_END and FIRE) */
-	while (1) {
+	while (!printer_job_cancelled()) {
 	  usleep(100000);
 	  status = lbp2900_get_status(state->ops);
+	  if (!status->extended_valid)
+		  continue;
 	  if (status->page_received == status->page_decoding)
 	    break;
 	}
 
+	if (printer_job_cancelled() || !status)
+		return false;
 	uint8_t buf[2] = { LO(status->page_decoding), HI(status->page_decoding) };
-	capt_sendrecv_retry(CAPT_FIRE, buf, 2, NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_FIRE, buf, 2, NULL, 0, 3), CAPT_FIRE);
 	lbp2900_wait_ready(state->ops);
 
 	/* Track the last fired page for job-end JOB_SETUP */
 	state->last_fired_page = status->page_decoding;
 
-	while (1) {
+	while (!printer_job_cancelled()) {
 		const struct capt_status_s *status = lbp2900_get_status(state->ops);
+		if (!status->extended_valid) {
+			usleep(100000);
+			continue;
+		}
 		/* Interesting. Using page_printing here results in shifted print */
 		if (status->page_out == status->page_decoding)
 			return true;
@@ -475,10 +507,11 @@ static bool lbp2900_page_epilogue(struct printer_state_s *state, const struct pa
 			fprintf(stderr, "DEBUG: CAPT: no paper\n");
 			if (FLAG(status, CAPT_FL_PRINTING) || FLAG(status, CAPT_FL_PROCESSING1))
 				continue;
-		return false;
+			return false;
+		}
+		usleep(100000);
 	}
-	usleep(100000);
-	}
+	return false;
 }
 
 static void lbp2900_wait_user(struct printer_state_s *state);
@@ -491,8 +524,12 @@ static void lbp2900_job_epilogue(struct printer_state_s *state)
 	 * Prefer the requested total pages when available; fall back to decoding count.
 	 */
 	if (state->options.total_pages > 0) {
-		while (1) {
+		while (!printer_job_cancelled()) {
 			const struct capt_status_s *status = lbp2900_get_status(state->ops);
+			if (!status->extended_valid) {
+				usleep(100000);
+				continue;
+			}
 			if (FLAG(status, CAPT_FL_NOPAPER1) || FLAG(status, CAPT_FL_NOPAPER2)
 				|| FLAG(status, CAPT_FL_PAPERJAM) || FLAG(status, CAPT_FL_JAMERR)
 				|| FLAG(status, CAPT_FL_COVEROPEN)) {
@@ -505,8 +542,12 @@ static void lbp2900_job_epilogue(struct printer_state_s *state)
 			usleep(100000);
 		}
 	} else {
-		while (1) {
+		while (!printer_job_cancelled()) {
 			const struct capt_status_s *status = lbp2900_get_status(state->ops);
+			if (!status->extended_valid) {
+				usleep(100000);
+				continue;
+			}
 			if (FLAG(status, CAPT_FL_NOPAPER1) || FLAG(status, CAPT_FL_NOPAPER2)
 				|| FLAG(status, CAPT_FL_PAPERJAM) || FLAG(status, CAPT_FL_JAMERR)
 				|| FLAG(status, CAPT_FL_COVEROPEN)) {
@@ -523,10 +564,11 @@ static void lbp2900_job_epilogue(struct printer_state_s *state)
 	/* Send final JOB_SETUP with fg=6 (end marker) before JOB_END.
 	 * USB captures show this appears once at the end of the job,
 	 * after all pages have been fired and completed. */
-	send_job_start(state, 6, state->last_fired_page);
+	require_command(send_job_start(state, 6, state->last_fired_page), CAPT_JOB_SETUP);
 	lbp2900_wait_ready(state->ops);
 
-	capt_sendrecv_retry(CAPT_JOB_END, jbuf, 2, NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_JOB_END, jbuf, 2, NULL, 0, 3),
+		CAPT_JOB_END);
 }
 
 static void lbp2900_page_setup(struct printer_state_s *state,
@@ -619,24 +661,31 @@ static void lbp2900_wait_user(struct printer_state_s *state)
 	status = lbp2900_get_status(state->ops);
 	if (FLAG(status, CAPT_FL_PAPERJAM) || FLAG(status, CAPT_FL_JAMERR)) {
 		fprintf(stderr, "DEBUG: CAPT: signaling paper jam via GPIO\n");
-		capt_sendrecv_retry(CAPT_GPIO, jambuf, ARRAY_SIZE(jambuf), NULL, 0, 3);
+		require_command(capt_sendrecv_retry(CAPT_GPIO, jambuf, ARRAY_SIZE(jambuf),
+			NULL, 0, 3), CAPT_GPIO);
 	} else {
 		fprintf(stderr, "DEBUG: CAPT: signaling no paper via GPIO\n");
-		capt_sendrecv_retry(CAPT_GPIO, blinkonbuf, ARRAY_SIZE(blinkonbuf), NULL, 0, 3);
+		require_command(capt_sendrecv_retry(CAPT_GPIO, blinkonbuf, ARRAY_SIZE(blinkonbuf),
+			NULL, 0, 3), CAPT_GPIO);
 	}
 	lbp2900_wait_ready(state->ops);
 
 	/* Send CAPT_RESET(0x0000) - seen in USB captures during both
 	 * paper jam and no-paper error recovery sequences */
 	uint8_t dummy[2] = {0x00, 0x00};
-	capt_sendrecv_retry(CAPT_RESET, dummy, sizeof(dummy), NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_RESET, dummy, sizeof(dummy), NULL, 0, 3),
+		CAPT_RESET);
 
 	/* Wait for error to be cleared (paper loaded / jam fixed / cover closed).
 	 * USB captures show: PAPERJAM (s2 bit 14) clears, goes through
 	 * COVEROPEN (s2 bit 12) transitionally, then s2=0 when fully clear.
 	 * For no-paper: nERROR (s2 bit 7) is the signal for button/ready. */
-	while (1) {
+	while (!printer_job_cancelled()) {
 		status = lbp2900_get_status(state->ops);
+		if (!status->valid) {
+			usleep(100000);
+			continue;
+		}
 		/* Check if jam/cover error has cleared */
 		if (!FLAG(status, CAPT_FL_PAPERJAM) && !FLAG(status, CAPT_FL_JAMERR)
 		    && !FLAG(status, CAPT_FL_COVEROPEN)) {
@@ -655,16 +704,21 @@ static void lbp2900_wait_user(struct printer_state_s *state)
 	}
 
 	/* Turn off LED */
-	capt_sendrecv_retry(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf), NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_GPIO, blinkoffbuf, ARRAY_SIZE(blinkoffbuf),
+		NULL, 0, 3), CAPT_GPIO);
 	lbp2900_wait_ready(state->ops);
 
 	/* Re-initialize printer after error recovery.
 	 * USB captures show full re-init after GPIO_off:
 	 *   START_1 → START_2 → START_3 → UPLOAD_2(DEADBEEF) */
-	capt_sendrecv_retry(CAPT_START_1, NULL, 0, NULL, 0, 3);
-	capt_sendrecv_retry(CAPT_START_2, NULL, 0, NULL, 0, 3);
-	capt_sendrecv_retry(CAPT_START_3, NULL, 0, NULL, 0, 3);
-	capt_sendrecv_retry(CAPT_UPLOAD_2, magicbuf_2, ARRAY_SIZE(magicbuf_2), NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_START_1, NULL, 0, NULL, 0, 3),
+		CAPT_START_1);
+	require_command(capt_sendrecv_retry(CAPT_START_2, NULL, 0, NULL, 0, 3),
+		CAPT_START_2);
+	require_command(capt_sendrecv_retry(CAPT_START_3, NULL, 0, NULL, 0, 3),
+		CAPT_START_3);
+	require_command(capt_sendrecv_retry(CAPT_UPLOAD_2, magicbuf_2,
+		ARRAY_SIZE(magicbuf_2), NULL, 0, 3), CAPT_UPLOAD_2);
 	lbp2900_wait_ready(state->ops);
 }
 
@@ -676,13 +730,15 @@ static void lbp2900_cancel_job(struct printer_state_s *state)
 	 * JOB_SETUP fg=4 (cancel) → START_2 → JOB_END
 	 * fg=4 sets buf[4]=0x00 (no data flag) */
 	fprintf(stderr, "DEBUG: CAPT: sending cancel (fg=4) to printer\n");
-	send_job_start(state, 4, 0);
+	require_command(send_job_start(state, 4, 0), CAPT_JOB_SETUP);
 	lbp2900_wait_ready(state->ops);
 
-	capt_sendrecv_retry(CAPT_START_2, NULL, 0, NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_START_2, NULL, 0, NULL, 0, 3),
+		CAPT_START_2);
 	lbp2900_wait_ready(state->ops);
 
-	capt_sendrecv_retry(CAPT_JOB_END, jbuf, 2, NULL, 0, 3);
+	require_command(capt_sendrecv_retry(CAPT_JOB_END, jbuf, 2, NULL, 0, 3),
+		CAPT_JOB_END);
 }
 
 static struct lbp2900_ops_s lbp2900_ops = {
